@@ -120,14 +120,51 @@ namespace HardwareTestApp
                 });
 
                 app.MapGet("/api/performance", () => {
-                    // Retorne os dados dinâmicos de CPU, RAM e temperaturas aqui
+                    // Serve os dados reais coletados pelo timer a cada 2s (UpdateAllData).
+                    // Antes retornava valores fixos de exemplo (cpu=110 etc.) e nunca
+                    // reflatia o hardware de verdade — por isso as barras de progresso
+                    // pareciam "travadas". Enquanto a primeira leitura não chega,
+                    // devolvemos um objeto zerado (o front já trata isso normalmente).
+                    if (_performanceDataCached != null)
+                    {
+                        return Results.Json(_performanceDataCached);
+                    }
+
                     return Results.Json(new
                     {
-                        cpu = 110,
-                        memory = 45,
-                        disk = 2,
-                        realtime = new { cpuTemp = 55, gpuTemp = 50, storageTemp = 38, batteryLevel = 100 }
+                        cpu = 0,
+                        memory = 0,
+                        disk = 0,
+                        realtime = new { cpuTemp = 0, gpuTemp = 0, storageTemp = 0, batteryLevel = 0 }
                     });
+                });
+
+                app.MapGet("/api/battery", () => {
+                    // Leitura sob demanda (sem cache) para refletir o estado de
+                    // carga/descarga em tempo real durante o teste de bateria.
+                    try
+                    {
+                        var collector = new SystemInfoCollector();
+                        var baterias = collector.GetBatteries();
+                        return Results.Json(baterias);
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.Json(new { error = ex.Message }, statusCode: 500);
+                    }
+                });
+
+                app.MapGet("/api/network", async () => {
+                    try
+                    {
+                        var netService = new NetworkService();
+                        var json = await netService.GetNetworkDataJson();
+                        return Results.Content(json, "application/json");
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.Json(new { error = ex.Message }, statusCode: 500);
+                    }
                 });
 
                 // ==========================================
@@ -183,6 +220,7 @@ namespace HardwareTestApp
                     IsStorageEnabled = true
                 };
                 _computer.Open();
+                RefreshHardwareSensors();
                 _cachedStorageLife = GetSensorValue(HardwareType.Storage, SensorType.Level, "Life") ?? 100;
             }
             catch (Exception ex)
@@ -217,6 +255,11 @@ namespace HardwareTestApp
 
             try
             {
+                // Atualiza os sensores do LibreHardwareMonitor antes de ler os valores.
+                // Sem isso, Sensor.Value nunca é atualizado após a primeira leitura e os
+                // dados de temperatura/bateria ficam "congelados" (bug reportado).
+                RefreshHardwareSensors();
+
                 // Alimenta os dados fixos na primeira iteração
                 if (_pcInfoCached == null)
                 {
@@ -291,6 +334,28 @@ namespace HardwareTestApp
             catch { }
         }
 
+        // Chama Update() em cada hardware monitorado (e em seus sub-hardwares, como os
+        // núcleos de GPU) para que os sensores tragam valores atuais a cada ciclo.
+        private void RefreshHardwareSensors()
+        {
+            if (_computer == null) return;
+            try
+            {
+                foreach (var hardware in _computer.Hardware)
+                {
+                    hardware.Update();
+                    foreach (var sub in hardware.SubHardware)
+                    {
+                        sub.Update();
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[HardwareMonitor] Falha ao atualizar sensores: {ex.Message}");
+            }
+        }
+
         private float? GetSensorValue(HardwareType hwType, SensorType sType, string sensorName = null)
         {
             if (_computer == null) return null;
@@ -298,7 +363,6 @@ namespace HardwareTestApp
             {
                 if (hardware.HardwareType == hwType)
                 {
-                    //hardware.Update();
                     foreach (var sensor in hardware.Sensors)
                     {
                         if (sensor.SensorType == sType)
