@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hardware Test App</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <!-- Top Bar - PC Info -->
+    <header class="top-bar">
+        <div class="pc-info">
+            <div class="info-item">
+                <span class="label">Modelo:</span>
+                <span class="value" id="pcModel">Carregando...</span>
+            </div>
+            <div class="info-item">
+                <span class="label">Número de Série:</span>
+                <span class="value" id="serialNumber">Carregando...</span>
+            </div>
+        </div>
+    </header>
+
+    <!-- Main Container -->
+    <div class="main-container">
+        <!-- Left Sidebar - Menu -->
+        <aside class="left-sidebar">
+            <nav class="menu">
+                <h2>Menu</h2>
+                <ul>
+                    <li><a href="#" class="menu-item active" data-page="home">Início</a></li>
+                    <li><a href="#" class="menu-item" data-page="speaker">Teste de Speaker</a></li>
+                    <li><a href="#" class="menu-item" data-page="microphone">Teste de Microfone</a></li>
+                    <li><a href="#" class="menu-item" data-page="camera">Teste de Câmera</a></li>
+                </ul>
+            </nav>
+        </aside>
+
+        <!-- Central Content -->
+        <main class="content">
+            <div class="page" id="home">
+                <h1>Testes de Hardware</h1>
+                <div class="cards-container">
+                    <div class="card" data-test="speaker">
+                        <div class="card-icon">🔊</div>
+                        <h3>Teste de Speaker</h3>
+                        <p>Verifique o funcionamento dos alto-falantes</p>
+                        <button class="btn-test">Iniciar Teste</button>
+                    </div>
+                    <div class="card" data-test="microphone">
+                        <div class="card-icon">🎤</div>
+                        <h3>Teste de Microfone</h3>
+                        <p>Verifique o funcionamento do microfone</p>
+                        <button class="btn-test">Iniciar Teste</button>
+                    </div>
+                    <div class="card" data-test="camera">
+                        <div class="card-icon">📷</div>
+                        <h3>Teste de Câmera</h3>
+                        <p>Verifique o funcionamento da câmera</p>
+                        <button class="btn-test">Iniciar Teste</button>
+                    </div>
+                </div>
+            </div>
+
+            <div class="page hidden" id="speaker">
+                <h1>Teste de Speaker</h1>
+                <div class="test-container">
+                    <p>Clique no botão abaixo para reproduzir um som de teste.</p>
+                    <button class="btn-action" id="playSoundBtn">Reproduzir Som</button>
+                    <audio id="testAudio" src=""></audio>
+                </div>
+            </div>
+
+            <div class="page hidden" id="microphone">
+                <h1>Teste de Microfone</h1>
+                <div class="test-container">
+                    <p>Clique no botão abaixo para iniciar a gravação.</p>
+                    <button class="btn-action" id="startRecordBtn">Iniciar Gravação</button>
+                    <button class="btn-action hidden" id="stopRecordBtn">Parar Gravação</button>
+                    <audio id="recordedAudio" controls class="hidden"></audio>
+                </div>
+            </div>
+
+            <div class="page hidden" id="camera">
+                <h1>Teste de Câmera</h1>
+                <div class="test-container">
+                    <p>Clique no botão abaixo para iniciar a câmera.</p>
+                    <button class="btn-action" id="startCameraBtn">Iniciar Câmera</button>
+                    <button class="btn-action hidden" id="stopCameraBtn">Parar Câmera</button>
+                    <video id="cameraVideo" class="hidden" autoplay></video>
+                    <canvas id="cameraCanvas" class="hidden"></canvas>
+                </div>
+            </div>
+        </main>
+
+        <!-- Right Sidebar - Performance Panel -->
+        <aside class="right-sidebar">
+            <button class="toggle-btn" id="togglePerformance">◀</button>
+            <div class="performance-panel" id="performancePanel">
+                <h2>Performance</h2>
+                <div class="performance-item">
+                    <span class="perf-label">CPU:</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="cpuBar" style="width: 0%"></div>
+                    </div>
+                    <span class="perf-value" id="cpuValue">0%</span>
+                </div>
+                <div class="performance-item">
+                    <span class="perf-label">Memória:</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="memoryBar" style="width: 0%"></div>
+                    </div>
+                    <span class="perf-value" id="memoryValue">0%</span>
+                </div>
+                <div class="performance-item">
+                    <span class="perf-label">Disco:</span>
+                    <div class="progress-bar">
+                        <div class="progress-fill" id="diskBar" style="width: 0%"></div>
+                    </div>
+                    <span class="perf-value" id="diskValue">0%</span>
+                </div>
+            </div>
+        </aside>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
