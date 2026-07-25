@@ -1,12 +1,8 @@
-﻿using System;
-using System.Runtime.InteropServices; // Necessário para [ComVisible]
+﻿using System.Runtime.InteropServices; // Necessário para [ComVisible]
 using System.Net.NetworkInformation;
 using System.Diagnostics;
-using System.Threading.Tasks;
 using System.Text.RegularExpressions;
 using System.Management;
-using System.Collections.Generic;
-using System.Linq;
 
 namespace HardwareTestApp
 {

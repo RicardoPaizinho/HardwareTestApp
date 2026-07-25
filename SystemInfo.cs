@@ -1,27 +1,16 @@
-using System;
 using System.Management;
 using System.Diagnostics;
-using System.IO;
-using System.Net;
 using System.Text.RegularExpressions;
-using System.Text;
 using Vortice.DXGI;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
-using System;
-using System.IO;
-using System.Linq;
-using System.Threading.Tasks;
-using LibreHardwareMonitor.Hardware.Motherboard;
 using System.Text.Json;
-using LibreHardwareMonitor.Hardware;
 
 
 namespace HardwareTestApp
 {
     public class SystemInfo
     {
-        private Computer _computer;
         public static object GetPCInfo()
         {
             ReadSystemInfo readSystemInfo = new ReadSystemInfo();
@@ -31,9 +20,6 @@ namespace HardwareTestApp
             List<String> gpus = new List<String> { "NVIDIA GeForce RTX 4050 Laptop GPU", "Intel(R) UHD Graphics" };
             //string smartList = ListPhysicalDisks();
             //Console.WriteLine("TEste Smart 1");
-            Console.WriteLine("TEste Smart 2");
-           // Console.WriteLine("TEste Smart");
-            //LH();
             var infoProcessor = GetProcessorInfo();
             var infoSystem = GetOperacionalSystemInfo();
             var infoMb = GetMbInfo();
@@ -73,6 +59,7 @@ namespace HardwareTestApp
 
                 memoria = readSystemInfo.GetMemoryInfo(),
                 armazenamento = readSystemInfo.HddInfo,
+                
                 placaVideo = VerificarGpu(), //readSystemInfo.Gpus[0]
                 lcd = readSystemInfo.LcdDetalhado,
 
@@ -516,31 +503,6 @@ namespace HardwareTestApp
                 Console.WriteLine($"Erro ao acessar o registro: {ex.Message}");
                 return "Erro";
             }
-        }
-
-        private float? GetSensorValue(HardwareType hwType, SensorType sType, string sensorName = null)
-        {
-            if (_computer == null) return null;
-            foreach (var hardware in _computer.Hardware)
-            {
-                if (hardware.HardwareType == hwType)
-                {
-                    hardware.Update();
-                    foreach (var sensor in hardware.Sensors)
-                    {
-                        if (sensor.SensorType == sType)
-                        {
-                            if (!string.IsNullOrEmpty(sensorName))
-                            {
-                                if (sensor.Name.IndexOf(sensorName, StringComparison.OrdinalIgnoreCase) >= 0) return sensor.Value;
-                                continue;
-                            }
-                            if (sensor.Value.HasValue) return sensor.Value;
-                        }
-                    }
-                }
-            }
-            return null;
         }
 
         private static void LH()

@@ -1,11 +1,7 @@
-﻿using HardwareTestApp;
-using Microsoft.Win32;
-using System;
+﻿using Microsoft.Win32;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Linq;
 using System.Management;
-using System.Threading.Tasks;
 
 namespace HardwareTestApp
 {
@@ -400,13 +396,7 @@ namespace HardwareTestApp
         {
             HddInfo = new List<String>();
             StorageInfo storageInfo = new StorageInfo();
-           // HddInfo = storageInfo.Verifica();
-            var discos = storageInfo.Verifica();
-            DiskInfo diskInfo = new DiskInfo();
-           // List <diskInfo> = storageInfo.Verifica();
-           // List<DiskInfo> diskInfo = storageInfo.Verifica();
-
-           // HddInfo.Add(diskInfo[0].Name +" "+diskInfo[0].SerialNumber);
+            HddInfo = storageInfo.Verifica();
 
             HddSizes = new List<String>();
             double convert = 0;

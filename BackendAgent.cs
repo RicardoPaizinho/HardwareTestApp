@@ -1,18 +1,6 @@
-using System;
 using System.Diagnostics;
-using System.IO;
-using System.Linq;
-using System.Text.Json;
-using System.Threading.Tasks;
-using System.Collections.Generic;
-using System.Runtime.InteropServices;
 using LibreHardwareMonitor.Hardware;
-using Microsoft.AspNetCore.Builder;
-using Microsoft.AspNetCore.Http;
-using Microsoft.Extensions.DependencyInjection;
-using Microsoft.AspNetCore.Hosting;
 using static HardwareTestApp.AutoTests;
-using Windows.ApplicationModel;
 
 namespace HardwareTestApp
 {
@@ -55,11 +43,19 @@ namespace HardwareTestApp
             {
                 var builder = WebApplication.CreateBuilder();
 
-                // 1. Configura o Kestrel para escutar em HTTP (5000) e HTTPS (5001)
+                // 1. Configura o Kestrel para escutar em HTTP puro (5000).
+                // Removemos o listener HTTPS (5001/UseHttps) de propósito: ele exigia um
+                // certificado de desenvolvimento (dotnet dev-certs) que não existe/expira em
+                // outras máquinas, quebrando o agente ao publicar em um PC novo.
+                // Isso NÃO quebra a câmera/microfone do site nem exige HTTPS aqui: o front
+                // (https://cdqweb.com.br) roda em HTTPS normalmente, e todos os navegadores
+                // modernos (Chrome, Edge, Firefox) tratam requisições para "localhost"/127.0.0.1
+                // como uma exceção ao bloqueio de "mixed content" — uma página HTTPS pode
+                // chamar http://localhost sem erro, exatamente pra viabilizar agentes locais
+                // como este. Só a página em si (cdqweb.com.br) precisa de HTTPS.
                 builder.WebHost.ConfigureKestrel(options =>
                 {
-                    options.ListenLocalhost(5000); // HTTP comum
-                    options.ListenLocalhost(5001, listenOptions => listenOptions.UseHttps()); // HTTPS Seguro para a Vercel
+                    options.ListenLocalhost(5000); // HTTP puro — sem certificado necessário
                 });
 
                 // 2. Configura a política de CORS para permitir que o front da Vercel acesse a API local
@@ -104,7 +100,7 @@ namespace HardwareTestApp
                         batteryHealth = 100 - GetSensorValue(HardwareType.Battery, SensorType.Level, "Degradation Level") ?? 0,
 
                         memoria = (string)pcInfo.memoria,
-                        //armazenamento = pcInfo.armazenamento,
+                        //armazenamento = "pcInfo.armazenamento",
                         armazenamento = pcInfo.armazenamento,
                         placaVideo = pcInfo.placaVideo,
 
@@ -197,9 +193,53 @@ namespace HardwareTestApp
                 });
 
                 // ==========================================
+                //     DIAGNÓSTICO AUTOMÁTICO (AutoTest.vue)
+                // ==========================================
+                // Serve o resultado já calculado no startup (RunInitialDiagnosticsAsync),
+                // que antes ficava só em cache sem nenhum endpoint expondo pro front —
+                // por isso o AutoTest.vue nunca recebia dados (dependia da ponte antiga
+                // window.chrome.webview.hostObjects, que não existe rodando via navegador).
+                app.MapGet("/api/auto-diagnostics", () => {
+                    return Results.Content(_cachedAutoJson, "application/json");
+                });
 
-                // Inicializa o servidor em background
-                app.Run();
+                // Permite reexecutar o diagnóstico automático sob demanda (opcional).
+                app.MapPost("/api/auto-diagnostics/refresh", async () => {
+                    await RunInitialDiagnosticsAsync();
+                    return Results.Content(_cachedAutoJson, "application/json");
+                });
+
+                // Substitui os antigos comandos da ponte WebView2 (OpenDevMgmt, etc.) por
+                // um endpoint HTTP simples que o front chama via fetch/POST.
+                app.MapPost("/api/auto-diagnostics/action", (AutoActionRequest req) => {
+                    try
+                    {
+                        RunSystemAction(req?.action);
+                        return Results.Json(new { success = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.Json(new { success = false, message = ex.Message }, statusCode: 500);
+                    }
+                });
+
+                // ==========================================
+
+                _webApp = app;
+
+                // Assim que o Kestrel confirma que subiu de verdade (não apenas "tentou"),
+                // abrimos o site em uma janela de navegador anônima/modo app.
+                app.Lifetime.ApplicationStarted.Register(() => {
+                    Console.WriteLine("[Kestrel] API local no ar em http://localhost:5000");
+                    LaunchBrowserWindow();
+                });
+
+                // IMPORTANTE: app.Run() é bloqueante — ele travava esta thread (a do
+                // construtor do BackendAgent) para sempre enquanto o servidor estivesse no
+                // ar, então o "[SUCESSO]" do Program.cs só aparecia quando o Kestrel FALHAVA
+                // (como no erro de certificado). RunAsync() não bloqueia: o Kestrel continua
+                // rodando em background e o resto da inicialização (e o Program.cs) segue.
+                _ = app.RunAsync();
             }
             catch (Exception ex)
             {
@@ -211,16 +251,12 @@ namespace HardwareTestApp
         {
             try
             {
-                _computer = new Computer
-                {
-                    IsCpuEnabled = true,
-                    IsGpuEnabled = true,
-                    IsBatteryEnabled = true,
-                    IsMotherboardEnabled = true,
-                    IsStorageEnabled = true
-                };
-                _computer.Open();
-                RefreshHardwareSensors();
+                // Usa a instância única compartilhada por todo o projeto — nunca abre
+                // um Computer próprio aqui (isso é o que causava o NullReferenceException
+                // em GenericCpu.Update() quando outra parte do código fechava sua própria
+                // instância e derrubava o driver Ring0 compartilhado).
+                _computer = HardwareMonitorSingleton.Instance;
+                HardwareMonitorSingleton.RefreshAll();
                 _cachedStorageLife = GetSensorValue(HardwareType.Storage, SensorType.Level, "Life") ?? 100;
             }
             catch (Exception ex)
@@ -336,24 +372,11 @@ namespace HardwareTestApp
 
         // Chama Update() em cada hardware monitorado (e em seus sub-hardwares, como os
         // núcleos de GPU) para que os sensores tragam valores atuais a cada ciclo.
+        // Delega para o HardwareMonitorSingleton, que é a ÚNICA instância de Computer
+        // do processo inteiro (veja HardwareMonitorSingleton.cs).
         private void RefreshHardwareSensors()
         {
-            if (_computer == null) return;
-            try
-            {
-                foreach (var hardware in _computer.Hardware)
-                {
-                    hardware.Update();
-                    foreach (var sub in hardware.SubHardware)
-                    {
-                        sub.Update();
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                Console.WriteLine($"[HardwareMonitor] Falha ao atualizar sensores: {ex.Message}");
-            }
+            HardwareMonitorSingleton.RefreshAll();
         }
 
         private float? GetSensorValue(HardwareType hwType, SensorType sType, string sensorName = null)
@@ -408,7 +431,7 @@ namespace HardwareTestApp
             foreach (var c in report.Cameras)
                 Console.WriteLine($"{c.DeviceName} - {c.Resolution}");
 
-            Console.WriteLine("\n=== MONITOR ===");
+            Console.WriteLine("\n=== MONITOR ===========");
             foreach (var m in report.Monitores)
                 Console.WriteLine($"{m.DeviceName} ({m.Manufacturer}) | {m.MaxScreenSize} | {m.InputType}  | {m.DeviceId} | {m.EdidVersion}");
 
@@ -433,10 +456,178 @@ namespace HardwareTestApp
         }
 
 
+        // -----------------------------------------------------------------------------
+        // NAVEGADOR EM MODO APP/ANÔNIMO
+        // -----------------------------------------------------------------------------
+        // Abre o cdqweb.com.br assim que o backend termina de subir. Usamos:
+        //   --incognito / --inprivate  -> não pede pra salvar usuário/senha
+        //   --app=URL                  -> janela "modo app", sem barra de endereço/abas
+        // Tenta Chrome primeiro (melhor suporte), cai para Edge (vem no Windows), e como
+        // último recurso abre no navegador padrão do sistema (sem os modos acima).
+        private static void LaunchBrowserWindow()
+
+        {
+
+            const string url = "https://cdqweb.vercel.app/";
+
+            try
+
+            {
+
+                var chromePath = FindBrowserPath(@"Google\Chrome\Application\chrome.exe");
+
+                if (chromePath != null)
+
+                {
+
+                    Process.Start(new ProcessStartInfo
+
+                    {
+
+                        FileName = chromePath,
+
+                        Arguments = $"--incognito --new-window --app=\"{url}\"",
+
+                        UseShellExecute = true
+
+                    });
+
+                    Console.WriteLine("[Browser] Chrome aberto em modo app/anônimo.");
+
+                    return;
+
+                }
+
+
+
+                var edgePath = FindBrowserPath(@"Microsoft\Edge\Application\msedge.exe");
+
+                if (edgePath != null)
+
+                {
+
+                    Process.Start(new ProcessStartInfo
+
+                    {
+
+                        FileName = edgePath,
+
+                        Arguments = $"--inprivate --new-window --app=\"{url}\"",
+
+                        UseShellExecute = true
+
+                    });
+
+                    Console.WriteLine("[Browser] Edge aberto em modo app/anônimo (InPrivate).");
+
+                    return;
+
+                }
+
+
+
+                // Último recurso: navegador padrão do sistema (sem modo app/anônimo garantido)
+
+                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+
+                Console.WriteLine("[Browser] Chrome/Edge não encontrados — aberto no navegador padrão.");
+
+            }
+
+            catch (Exception ex)
+
+            {
+
+                Console.WriteLine($"[Browser] Falha ao abrir o navegador: {ex.Message}");
+
+            }
+
+        }
+
+
+
+        // Procura o executável em Program Files, Program Files (x86) e AppData\Local
+        // (instalação por usuário, comum no Chrome).
+        private static string FindBrowserPath(string relativeExePath)
+        {
+            string[] roots =
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetEnvironmentVariable("LocalAppData")
+            };
+
+            foreach (var root in roots)
+            {
+                if (string.IsNullOrEmpty(root)) continue;
+                var fullPath = Path.Combine(root, relativeExePath);
+                if (File.Exists(fullPath)) return fullPath;
+            }
+            return null;
+        }
+
+        // -----------------------------------------------------------------------------
+        // AÇÕES DO AUTOTEST (substituem os antigos comandos da ponte WebView2)
+        // -----------------------------------------------------------------------------
+        public class AutoActionRequest
+        {
+            public string action { get; set; }
+        }
+
+        private static void RunSystemAction(string action)
+        {
+            switch (action)
+            {
+                case "OpenDevMgmt":
+                    Process.Start(new ProcessStartInfo("devmgmt.msc") { UseShellExecute = true });
+                    break;
+
+                case "OpenBitlockerSettings":
+                    Process.Start(new ProcessStartInfo("control.exe", "/name Microsoft.BitLockerDriveEncryption") { UseShellExecute = true });
+                    break;
+
+                case "OpenDiskMgmt":
+                    Process.Start(new ProcessStartInfo("diskmgmt.msc") { UseShellExecute = true });
+                    break;
+
+                case "OpenActivationSettings":
+                    Process.Start(new ProcessStartInfo("ms-settings:activation") { UseShellExecute = true });
+                    break;
+
+                case "OpenHDSentinel":
+                    TryOpenHdSentinel();
+                    break;
+
+                default:
+                    throw new ArgumentException($"Ação desconhecida: {action}");
+            }
+        }
+
+        private static void TryOpenHdSentinel()
+        {
+            string[] candidatePaths =
+            {
+                @"C:\Program Files\HDSentinel\HDSentinel.exe",
+                @"C:\Program Files (x86)\HDSentinel\HDSentinel.exe"
+            };
+
+            foreach (var path in candidatePaths)
+            {
+                if (File.Exists(path))
+                {
+                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+                    return;
+                }
+            }
+            throw new FileNotFoundException("HD Sentinel não encontrado neste equipamento.");
+        }
+
         public void Dispose()
         {
             _monitorTimer?.Dispose();
-            _computer?.Close();
+            // Fecha o Computer aqui — este é o ÚNICO lugar do projeto que deve chamar
+            // Shutdown()/Close(), pois é o encerramento do processo inteiro.
+            HardwareMonitorSingleton.Shutdown();
             try { _webApp?.StopAsync(); } catch { }
         }
     }

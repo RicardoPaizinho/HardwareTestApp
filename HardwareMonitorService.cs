@@ -1,12 +1,4 @@
-﻿using LibreHardwareMonitor.Hardware;
-using System;
-using System.Collections.Generic;
-using System.Diagnostics;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-
-namespace HardwareTestApp
+﻿namespace HardwareTestApp
 {
     using System;
     using System.Collections.Generic;
@@ -18,33 +10,23 @@ namespace HardwareTestApp
         {
             var hardwareInfo = new Dictionary<string, string>();
 
-            // Inicializa o objeto principal que gerencia o hardware
-            Computer computer = new Computer
-            {
-                IsCpuEnabled = true,
-                IsGpuEnabled = true,
-                IsMemoryEnabled = true,
-                IsMotherboardEnabled = true,
-                IsControllerEnabled = true,
-                IsNetworkEnabled = true,
-                IsPowerMonitorEnabled = true,
-                IsStorageEnabled = true
-            };
-
             try
             {
-                computer.Open();
+                // Usa a instância única compartilhada por todo o projeto (HardwareMonitorSingleton).
+                // Antes este método abria E FECHAVA seu próprio Computer, o que derrubava o
+                // driver Ring0 compartilhado e quebrava qualquer outra instância aberta em
+                // paralelo (ex: a do BackendAgent) — causando NullReferenceException em
+                // Update() nos ciclos seguintes.
+                var computer = HardwareMonitorSingleton.Instance;
+                HardwareMonitorSingleton.RefreshAll();
 
                 // Percorre cada componente de hardware detectado (CPU, GPU, etc.)
                 foreach (IHardware hardware in computer.Hardware)
                 {
-                    // Força a atualização dos dados do componente
-                    hardware.Update();
-
                     // Percorre sub-hardwares (ex: canais específicos em algumas placas)
                     foreach (IHardware subHardware in hardware.SubHardware)
                     {
-                        subHardware.Update();
+                        // Já atualizado por HardwareMonitorSingleton.RefreshAll()
                     }
 
                     // Percorre todos os sensores disponíveis neste hardware
@@ -68,14 +50,14 @@ namespace HardwareTestApp
             {
                 hardwareInfo.Add("Erro de Leitura", ex.Message);
             }
-            finally
-            {
-                // Sempre fechar para liberar os drivers e recursos do sistema
-                computer.Close();
-            }
+
+            // NOTA: NÃO fechamos o Computer aqui. Ele só é fechado uma vez, no
+            // encerramento do processo, via HardwareMonitorSingleton.Shutdown()
+            // (chamado em BackendAgent.Dispose()).
 
             return hardwareInfo;
         }
     }
 
 }
+
