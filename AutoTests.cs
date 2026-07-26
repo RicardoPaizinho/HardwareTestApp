@@ -126,8 +126,71 @@ namespace HardwareTestApp
 
             private object CheckSmart()
             {
-                // Mock para o HDSentinel
-                return new { status = "check", details = new { temp = 35, health = 100 } };
+                try
+                {
+                    // Antes era um mock fixo pro HDSentinel (temp=35, health=100).
+                    // Agora lemos de verdade via LibreHardwareMonitor, pela instância
+                    // única compartilhada com o resto do projeto.
+                    var computer = HardwareMonitorSingleton.Instance;
+                    HardwareMonitorSingleton.RefreshAll();
+
+                    foreach (var hardware in computer.Hardware)
+                    {
+                        if (hardware.HardwareType != LibreHardwareMonitor.Hardware.HardwareType.Storage)
+                            continue;
+
+                        float? temp = null;
+                        float? health = null;
+
+                        foreach (var sensor in hardware.Sensors)
+                        {
+                            if (sensor.SensorType == LibreHardwareMonitor.Hardware.SensorType.Temperature && temp == null)
+                                temp = sensor.Value;
+
+                            if (sensor.SensorType == LibreHardwareMonitor.Hardware.SensorType.Level &&
+                                sensor.Name.IndexOf("Life", StringComparison.OrdinalIgnoreCase) >= 0)
+                                health = sensor.Value;
+                        }
+
+                        // Fallback: se não achou um sensor "Life" específico, usa o
+                        // primeiro sensor de nível/porcentagem disponível no disco.
+                        if (health == null)
+                        {
+                            foreach (var sensor in hardware.Sensors)
+                            {
+                                if (sensor.SensorType == LibreHardwareMonitor.Hardware.SensorType.Level)
+                                {
+                                    health = sensor.Value;
+                                    break;
+                                }
+                            }
+                        }
+
+                        double healthVal = health.HasValue ? Math.Round(health.Value, 1) : 100;
+                        double tempVal = temp.HasValue ? Math.Round(temp.Value, 1) : 0;
+                        bool ok = healthVal >= 70 && (temp == null || tempVal < 60);
+
+                        return new
+                        {
+                            status = ok ? "check" : "alert",
+                            details = new
+                            {
+                                modelo = hardware.Name,
+                                temp = tempVal,
+                                health = healthVal
+                            }
+                        };
+                    }
+
+                    // Nenhum disco reconhecido pelo LibreHardwareMonitor (raro, mas
+                    // pode acontecer sem permissão de Administrador).
+                    return new { status = "alert", details = new { modelo = "Desconhecido", temp = 0, health = 0, info = "Disco não detectado pelo LibreHardwareMonitor." } };
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[AutoTest] Falha ao ler SMART via LibreHardwareMonitor: {ex.Message}");
+                    return new { status = "alert", details = new { modelo = "Erro", temp = 0, health = 0, info = ex.Message } };
+                }
             }
 
             private bool IsWindowsActivatedNEW()

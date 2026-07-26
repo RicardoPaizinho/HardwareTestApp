@@ -41,6 +41,12 @@ namespace HardwareTestApp
             // 2. Dispara a geração inicial de diagnósticos automáticos
             _ = RunInitialDiagnosticsAsync();
 
+            // 2.1. Busca o histórico de falhas (BSOD/erros críticos) do Visualizador
+            // de Eventos uma vez no startup — antes UpdateLogsCache() existia mas
+            // nunca era chamado em lugar nenhum, então o cache ficava sempre vazio.
+            // Roda em background (Task.Run) porque ler o EventLog pode ser lento.
+            _ = System.Threading.Tasks.Task.Run(() => UpdateLogsCache());
+
             // 3. Inicia o Timer de desempenho (atualiza a cada 2 segundos)
             _monitorTimer = new System.Threading.Timer(async _ => await UpdateAllData(), null, 0, 2000);
 
@@ -90,7 +96,7 @@ namespace HardwareTestApp
                 // ENDPOINTS DO MONITOR DE HARDWARE (Exemplos)
                 // ==========================================
                 dynamic pcInfo = SystemInfo.GetPCInfo();
-                testes();
+                //testes();
                 app.MapGet("/api/pc-info", () => {
                     // Retorne o objeto com os dados estáticos do seu hardware aqui
                     return Results.Json(new
@@ -202,6 +208,39 @@ namespace HardwareTestApp
                 {
                     var eventos = KeyboardInterceptor.FlushEvents();
                     return Results.Json(eventos);
+                });
+
+                // ==========================================
+                //     TESTE DE USB (UsbTest.vue)
+                // ==========================================
+                // Liga/desliga o monitor de conexão/desconexão USB (evento WMI).
+                app.MapPost("/api/usb/monitor", (UsbMonitorRequest req) => {
+                    if (req?.enabled == true) UsbMonitorService.Start();
+                    else UsbMonitorService.Stop();
+                    return Results.Json(new { success = true, monitoring = UsbMonitorService.IsMonitoring });
+                });
+
+                // O front consome e limpa a fila a cada poll (mesmo padrão do teclado).
+                app.MapGet("/api/usb/eventos", () => {
+                    var eventos = UsbMonitorService.FlushEvents();
+                    return Results.Json(eventos);
+                });
+
+                // ==========================================
+                //     HISTÓRICO DE FALHAS (EventLogAnalyzer.vue)
+                // ==========================================
+                // Serve o cache computado no startup (UpdateLogsCache, chamado
+                // no construtor) — antes ficava calculado só na memória sem
+                // nenhum endpoint expondo pro front (mesmo problema do auto-diagnóstico).
+                app.MapGet("/api/eventlog", () => {
+                    return Results.Json(_eventLogsCached);
+                });
+
+                // Permite reexecutar a busca no Visualizador de Eventos sob demanda
+                // (botão "ATUALIZAR" do EventLogAnalyzer.vue).
+                app.MapPost("/api/eventlog/refresh", () => {
+                    UpdateLogsCache();
+                    return Results.Json(_eventLogsCached);
                 });
 
                 // ==========================================
@@ -334,6 +373,11 @@ namespace HardwareTestApp
         public class AutoActionRequest
         {
             public string action { get; set; }
+        }
+
+        public class UsbMonitorRequest
+        {
+            public bool enabled { get; set; }
         }
 
         private static void RunSystemAction(string action)
@@ -595,6 +639,7 @@ namespace HardwareTestApp
         public void Dispose()
         {
             _monitorTimer?.Dispose();
+            UsbMonitorService.Stop();
             // Fecha o Computer aqui — este é o ÚNICO lugar do projeto que deve chamar
             // Shutdown()/Close(), pois é o encerramento do processo inteiro.
             HardwareMonitorSingleton.Shutdown();
