@@ -30,7 +30,12 @@
 // =====================================================================================
 
 using LibreHardwareMonitor.Hardware;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
 using System.Management;
+using static System.Net.Mime.MediaTypeNames;
 
 namespace HardwareTestApp
 {
@@ -179,7 +184,7 @@ namespace HardwareTestApp
             }
             catch (Exception ex)
             {
-              //  Console.WriteLine($"[WMI] Falha ao consultar '{wql}' em '{scope}': {ex.Message}");
+                Console.WriteLine($"[WMI] Falha ao consultar '{wql}' em '{scope}': {ex.Message}");
             }
             return results;
         }
@@ -388,11 +393,11 @@ namespace HardwareTestApp
         private static string MapBatteryStatus(string code) => code switch
         {
             "1" => "Descarregando",
-            "2" => "Carregando",
+            "2" => "Conectada na tomada (não carregando)",
             "3" => "Totalmente carregada",
             "4" => "Baixa",
             "5" => "Crítica",
-            "6" => "Carregando_",
+            "6" => "Carregando",
             "7" => "Carregando e alta",
             "8" => "Carregando e baixa",
             "9" => "Carregando e crítica",
@@ -430,8 +435,8 @@ namespace HardwareTestApp
         // -----------------------------------------------------------------------------
         public List<LcdInfo> GetDisplays()
         {
-          //  Aplicando o Teorema de Pitágoras: A diagonal(d) é calculada elevando a largura e a 
-           //     altura ao quadrado:\(d = \sqrt{ 31 ^ 2 + 17 ^ 2}\)\(d = \sqrt{ 961 + 289}\)\(d = \sqrt{ 1250} \approx 35,35 \text{ cm}\)Convertendo para Polegadas: Como 1 polegada equivale a 2,54 cm, basta dividir o valor da diagonal:35,35 cm ÷ 2,54 = 13,91 polegadas.
+            //  Aplicando o Teorema de Pitágoras: A diagonal(d) é calculada elevando a largura e a 
+            //     altura ao quadrado:\(d = \sqrt{ 31 ^ 2 + 17 ^ 2}\)\(d = \sqrt{ 961 + 289}\)\(d = \sqrt{ 1250} \approx 35,35 \text{ cm}\)Convertendo para Polegadas: Como 1 polegada equivale a 2,54 cm, basta dividir o valor da diagonal:35,35 cm ÷ 2,54 = 13,91 polegadas.
             var list = new List<LcdInfo>();
 
             var ids = Query("SELECT * FROM WmiMonitorID", @"root\WMI");
@@ -599,13 +604,13 @@ namespace HardwareTestApp
                 }
             }
 
-            // Complemento via LibreHardwareMonitor (requer execução como Administrador).
-            // Usa a instância única compartilhada por todo o projeto — NUNCA cria/abre/fecha
-            // um Computer próprio aqui. Fazer isso derruba o driver Ring0 compartilhado e
-            // quebra qualquer outra instância que já esteja aberta (ex: a do BackendAgent),
-            // causando NullReferenceException em Update() nos ciclos seguintes.
+            // Complemento via LibreHardwareMonitor (requer execução como Administrador)
             try
             {
+                // Usa a instância única compartilhada por todo o projeto — nunca abre
+                // nem fecha um Computer próprio aqui. Fechar uma instância separada
+                // derrubava o driver Ring0 compartilhado e quebrava a instância
+                // principal do BackendAgent com NullReferenceException.
                 var computer = HardwareMonitorSingleton.Instance;
                 HardwareMonitorSingleton.RefreshAll();
 
@@ -752,11 +757,9 @@ namespace HardwareTestApp
             foreach (var c in report.Cameras)
                 Console.WriteLine($"{c.DeviceName} - {c.Resolution}");
 
-            Console.WriteLine("\n=== MONITOR =======");
-            foreach (var m in report.Monitores) {
+            Console.WriteLine("\n=== MONITOR ===");
+            foreach (var m in report.Monitores)
                 Console.WriteLine($"{m.DeviceName} ({m.Manufacturer}) | {m.MaxScreenSize} | {m.InputType}");
-                Console.WriteLine($"{m.DeviceId}" + "TESTE" );
-            }
 
             Console.WriteLine("\n=== WI-FI ===");
             foreach (var w in report.WifiAdapters)
@@ -777,7 +780,7 @@ namespace HardwareTestApp
             Console.WriteLine($"{report.Sistema.Sistema} | {report.Sistema.Architecture} | Build {report.Sistema.Build} | Versão {report.Sistema.Version} | {report.Sistema.Ativacao}");
             Console.WriteLine($"Chave OEM: {report.Sistema.ProductKey}");
         }
-    
-    
+
+
     }
 }

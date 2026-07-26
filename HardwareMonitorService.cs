@@ -1,4 +1,12 @@
-﻿namespace HardwareTestApp
+﻿using LibreHardwareMonitor.Hardware;
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
+
+namespace HardwareTestApp
 {
     using System;
     using System.Collections.Generic;
@@ -12,12 +20,10 @@
 
             try
             {
-                // Usa a instância única compartilhada por todo o projeto (HardwareMonitorSingleton).
-                // Antes este método abria E FECHAVA seu próprio Computer, o que derrubava o
-                // driver Ring0 compartilhado e quebrava qualquer outra instância aberta em
-                // paralelo (ex: a do BackendAgent) — causando NullReferenceException em
-                // Update() nos ciclos seguintes.
-                var computer = HardwareMonitorSingleton.Instance;
+                // Usa a instância única compartilhada por todo o projeto — nunca abre
+                // nem fecha um Computer próprio aqui (isso fechava o driver Ring0 pra
+                // todo o processo, quebrando o BackendAgent com NullReferenceException).
+                Computer computer = HardwareMonitorSingleton.Instance;
                 HardwareMonitorSingleton.RefreshAll();
 
                 // Percorre cada componente de hardware detectado (CPU, GPU, etc.)
@@ -26,7 +32,7 @@
                     // Percorre sub-hardwares (ex: canais específicos em algumas placas)
                     foreach (IHardware subHardware in hardware.SubHardware)
                     {
-                        // Já atualizado por HardwareMonitorSingleton.RefreshAll()
+                        // já atualizados por HardwareMonitorSingleton.RefreshAll()
                     }
 
                     // Percorre todos os sensores disponíveis neste hardware
@@ -50,14 +56,11 @@
             {
                 hardwareInfo.Add("Erro de Leitura", ex.Message);
             }
-
-            // NOTA: NÃO fechamos o Computer aqui. Ele só é fechado uma vez, no
-            // encerramento do processo, via HardwareMonitorSingleton.Shutdown()
-            // (chamado em BackendAgent.Dispose()).
+            // SEM finally/Close() aqui — quem encerra o Computer é sempre
+            // HardwareMonitorSingleton.Shutdown(), uma única vez, no fim do processo.
 
             return hardwareInfo;
         }
     }
 
 }
-

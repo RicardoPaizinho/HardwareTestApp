@@ -1,10 +1,20 @@
+using System;
 using System.Management;
 using System.Diagnostics;
+using System.IO;
+using System.Net;
 using System.Text.RegularExpressions;
+using System.Text;
 using Vortice.DXGI;
 using Microsoft.Win32;
 using System.Runtime.InteropServices;
+using System;
+using System.IO;
+using System.Linq;
+using System.Threading.Tasks;
+using LibreHardwareMonitor.Hardware.Motherboard;
 using System.Text.Json;
+using LibreHardwareMonitor.Hardware;
 
 
 namespace HardwareTestApp
@@ -20,6 +30,9 @@ namespace HardwareTestApp
             List<String> gpus = new List<String> { "NVIDIA GeForce RTX 4050 Laptop GPU", "Intel(R) UHD Graphics" };
             //string smartList = ListPhysicalDisks();
             //Console.WriteLine("TEste Smart 1");
+            Console.WriteLine("TEste Smart 2");
+            // Console.WriteLine("TEste Smart");
+            //LH();
             var infoProcessor = GetProcessorInfo();
             var infoSystem = GetOperacionalSystemInfo();
             var infoMb = GetMbInfo();
@@ -59,7 +72,6 @@ namespace HardwareTestApp
 
                 memoria = readSystemInfo.GetMemoryInfo(),
                 armazenamento = readSystemInfo.HddInfo,
-                
                 placaVideo = VerificarGpu(), //readSystemInfo.Gpus[0]
                 lcd = readSystemInfo.LcdDetalhado,
 
@@ -422,7 +434,7 @@ namespace HardwareTestApp
         public static Dictionary<string, string> GetOperacionalSystemInfo()
         {
             var result = new Dictionary<string, string>();
-           
+
             try
             {
                 // 1. SEMPRE use "SELECT *" para evitar erros de nomes de propriedades inexistentes
@@ -459,7 +471,7 @@ namespace HardwareTestApp
         public static String GetSystemKey()
         {
             var result = new Dictionary<string, string>();
-            string key=" ";
+            string key = " ";
             try
             {
                 // 1. Obtendo a Chave do Windows (Digital ou BIOS)
@@ -472,7 +484,7 @@ namespace HardwareTestApp
                     key = !string.IsNullOrEmpty(key) ? key : "Chave Digital/Não encontrada";
                 }
 
-               
+
             }
             catch (Exception ex)
             {
@@ -573,11 +585,11 @@ namespace HardwareTestApp
             return "Modelo não identificado";
         }
 
-       // public static async SmartMoonTools()
-             public static async Task<string> ExecuteSmartctl(string disk)
+        // public static async SmartMoonTools()
+        public static async Task<string> ExecuteSmartctl(string disk)
         {
             SmartService smartService = new SmartService();
-           // smartService.GetDiskDataJson("c");
+            // smartService.GetDiskDataJson("c");
 
             // ... dentro do seu método async
             string rawJson = await smartService.GetDiskDataJson("/dev/sda");
@@ -587,7 +599,7 @@ namespace HardwareTestApp
                 // Transforma em um objeto e formata com espaços (WriteIndented)
                 var jsonElement = JsonSerializer.Deserialize<JsonElement>(rawJson);
                 string prettyJson = JsonSerializer.Serialize(jsonElement, new JsonSerializerOptions { WriteIndented = true });
-         
+
                 Console.WriteLine(prettyJson);
                 return prettyJson;
             }
@@ -626,7 +638,7 @@ namespace HardwareTestApp
 
 
 
-            private readonly SmartService _smartService = new SmartService();
+        private readonly SmartService _smartService = new SmartService();
 
         // 1. LISTAGEM DE DISCOS (Para o select do Vue)
         public async Task<List<DiskInfo>> GetSmartDiskListAsync()
@@ -692,19 +704,19 @@ namespace HardwareTestApp
 
         // 2. DADOS DETALHADOS DE UM DISCO ESPECÍFICO
         public async Task<string> GetDetailedSmartDataAsync(string devicePath)
-            {
-                // Retorna o JSON bruto do smartctl diretamente para o Vue processar
-                // Isso economiza memória no C# e deixa o processamento pesado de UI para o Chrome/Vue
-                return await _smartService.GetDiskDataJson(devicePath);
-            }
+        {
+            // Retorna o JSON bruto do smartctl diretamente para o Vue processar
+            // Isso economiza memória no C# e deixa o processamento pesado de UI para o Chrome/Vue
+            return await _smartService.GetDiskDataJson(devicePath);
+        }
 
-            // 3. EXECUTAR TESTES (Short/Long)
-            public async Task<object> RunDeviceTestAsync(string devicePath, string testType)
-            {
-                // Comando: smartctl -t short /dev/sda
-                string result = await _smartService.ExecuteCommand($"-t {testType} --json {devicePath}");
-                return new { type = "testStarted", raw = result };
-            }
+        // 3. EXECUTAR TESTES (Short/Long)
+        public async Task<object> RunDeviceTestAsync(string devicePath, string testType)
+        {
+            // Comando: smartctl -t short /dev/sda
+            string result = await _smartService.ExecuteCommand($"-t {testType} --json {devicePath}");
+            return new { type = "testStarted", raw = result };
+        }
 
 
         private List<DiskInfo> ParseSmartDiskList(string jsonRaw)

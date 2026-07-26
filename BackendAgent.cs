@@ -1,6 +1,18 @@
+using System;
 using System.Diagnostics;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using System.Collections.Generic;
+using System.Runtime.InteropServices;
 using LibreHardwareMonitor.Hardware;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.AspNetCore.Hosting;
 using static HardwareTestApp.AutoTests;
+//using Windows.ApplicationModel;
 
 namespace HardwareTestApp
 {
@@ -48,11 +60,11 @@ namespace HardwareTestApp
                 // certificado de desenvolvimento (dotnet dev-certs) que não existe/expira em
                 // outras máquinas, quebrando o agente ao publicar em um PC novo.
                 // Isso NÃO quebra a câmera/microfone do site nem exige HTTPS aqui: o front
-                // (https://cdqweb.com.br) roda em HTTPS normalmente, e todos os navegadores
+                // (https://api.cdqweb.com.br) roda em HTTPS normalmente, e todos os navegadores
                 // modernos (Chrome, Edge, Firefox) tratam requisições para "localhost"/127.0.0.1
                 // como uma exceção ao bloqueio de "mixed content" — uma página HTTPS pode
                 // chamar http://localhost sem erro, exatamente pra viabilizar agentes locais
-                // como este. Só a página em si (cdqweb.com.br) precisa de HTTPS.
+                // como este. Só a página em si (api.cdqweb.com.br) precisa de HTTPS.
                 builder.WebHost.ConfigureKestrel(options =>
                 {
                     options.ListenLocalhost(5000); // HTTP puro — sem certificado necessário
@@ -100,7 +112,7 @@ namespace HardwareTestApp
                         batteryHealth = 100 - GetSensorValue(HardwareType.Battery, SensorType.Level, "Degradation Level") ?? 0,
 
                         memoria = (string)pcInfo.memoria,
-                        //armazenamento = "pcInfo.armazenamento",
+                        //armazenamento = pcInfo.armazenamento,
                         armazenamento = pcInfo.armazenamento,
                         placaVideo = pcInfo.placaVideo,
 
@@ -247,6 +259,131 @@ namespace HardwareTestApp
             }
         }
 
+        // -----------------------------------------------------------------------------
+        // NAVEGADOR EM MODO APP/ANÔNIMO
+        // -----------------------------------------------------------------------------
+        // Abre o api.cdqweb.com.br assim que o backend termina de subir. Usamos:
+        //   --incognito / --inprivate  -> não pede pra salvar usuário/senha
+        //   --app=URL                  -> janela "modo app", sem barra de endereço/abas
+        // Tenta Chrome primeiro (melhor suporte), cai para Edge (vem no Windows), e como
+        // último recurso abre no navegador padrão do sistema (sem os modos acima).
+        private static void LaunchBrowserWindow()
+        {
+            const string url = "https://api.cdqweb.com.br";
+            try
+            {
+                var chromePath = FindBrowserPath(@"Google\Chrome\Application\chrome.exe");
+                if (chromePath != null)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = chromePath,
+                        Arguments = $"--incognito --new-window --app=\"{url}\"",
+                        UseShellExecute = true
+                    });
+                    Console.WriteLine("[Browser] Chrome aberto em modo app/anônimo.");
+                    return;
+                }
+
+                var edgePath = FindBrowserPath(@"Microsoft\Edge\Application\msedge.exe");
+                if (edgePath != null)
+                {
+                    Process.Start(new ProcessStartInfo
+                    {
+                        FileName = edgePath,
+                        Arguments = $"--inprivate --new-window --app=\"{url}\"",
+                        UseShellExecute = true
+                    });
+                    Console.WriteLine("[Browser] Edge aberto em modo app/anônimo (InPrivate).");
+                    return;
+                }
+
+                // Último recurso: navegador padrão do sistema (sem modo app/anônimo garantido)
+                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
+                Console.WriteLine("[Browser] Chrome/Edge não encontrados — aberto no navegador padrão.");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Browser] Falha ao abrir o navegador: {ex.Message}");
+            }
+        }
+
+        // Procura o executável em Program Files, Program Files (x86) e AppData\Local
+        // (instalação por usuário, comum no Chrome).
+        private static string FindBrowserPath(string relativeExePath)
+        {
+            string[] roots =
+            {
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
+                Environment.GetEnvironmentVariable("LocalAppData")
+            };
+
+            foreach (var root in roots)
+            {
+                if (string.IsNullOrEmpty(root)) continue;
+                var fullPath = Path.Combine(root, relativeExePath);
+                if (File.Exists(fullPath)) return fullPath;
+            }
+            return null;
+        }
+
+        // -----------------------------------------------------------------------------
+        // AÇÕES DO AUTOTEST (substituem os antigos comandos da ponte WebView2)
+        // -----------------------------------------------------------------------------
+        public class AutoActionRequest
+        {
+            public string action { get; set; }
+        }
+
+        private static void RunSystemAction(string action)
+        {
+            switch (action)
+            {
+                case "OpenDevMgmt":
+                    Process.Start(new ProcessStartInfo("devmgmt.msc") { UseShellExecute = true });
+                    break;
+
+                case "OpenBitlockerSettings":
+                    Process.Start(new ProcessStartInfo("control.exe", "/name Microsoft.BitLockerDriveEncryption") { UseShellExecute = true });
+                    break;
+
+                case "OpenDiskMgmt":
+                    Process.Start(new ProcessStartInfo("diskmgmt.msc") { UseShellExecute = true });
+                    break;
+
+                case "OpenActivationSettings":
+                    Process.Start(new ProcessStartInfo("ms-settings:activation") { UseShellExecute = true });
+                    break;
+
+                case "OpenHDSentinel":
+                    TryOpenHdSentinel();
+                    break;
+
+                default:
+                    throw new ArgumentException($"Ação desconhecida: {action}");
+            }
+        }
+
+        private static void TryOpenHdSentinel()
+        {
+            string[] candidatePaths =
+            {
+                @"C:\Program Files\HDSentinel\HDSentinel.exe",
+                @"C:\Program Files (x86)\HDSentinel\HDSentinel.exe"
+            };
+
+            foreach (var path in candidatePaths)
+            {
+                if (File.Exists(path))
+                {
+                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
+                    return;
+                }
+            }
+            throw new FileNotFoundException("HD Sentinel não encontrado neste equipamento.");
+        }
+
         private void InitHardwareMonitor()
         {
             try
@@ -372,8 +509,7 @@ namespace HardwareTestApp
 
         // Chama Update() em cada hardware monitorado (e em seus sub-hardwares, como os
         // núcleos de GPU) para que os sensores tragam valores atuais a cada ciclo.
-        // Delega para o HardwareMonitorSingleton, que é a ÚNICA instância de Computer
-        // do processo inteiro (veja HardwareMonitorSingleton.cs).
+        // Delega para o singleton — nunca mexe em uma instância própria de Computer.
         private void RefreshHardwareSensors()
         {
             HardwareMonitorSingleton.RefreshAll();
@@ -431,7 +567,7 @@ namespace HardwareTestApp
             foreach (var c in report.Cameras)
                 Console.WriteLine($"{c.DeviceName} - {c.Resolution}");
 
-            Console.WriteLine("\n=== MONITOR ===========");
+            Console.WriteLine("\n=== MONITOR ===");
             foreach (var m in report.Monitores)
                 Console.WriteLine($"{m.DeviceName} ({m.Manufacturer}) | {m.MaxScreenSize} | {m.InputType}  | {m.DeviceId} | {m.EdidVersion}");
 
@@ -455,172 +591,6 @@ namespace HardwareTestApp
             Console.WriteLine($"Chave OEM: {report.Sistema.ProductKey}");
         }
 
-
-        // -----------------------------------------------------------------------------
-        // NAVEGADOR EM MODO APP/ANÔNIMO
-        // -----------------------------------------------------------------------------
-        // Abre o cdqweb.com.br assim que o backend termina de subir. Usamos:
-        //   --incognito / --inprivate  -> não pede pra salvar usuário/senha
-        //   --app=URL                  -> janela "modo app", sem barra de endereço/abas
-        // Tenta Chrome primeiro (melhor suporte), cai para Edge (vem no Windows), e como
-        // último recurso abre no navegador padrão do sistema (sem os modos acima).
-        private static void LaunchBrowserWindow()
-
-        {
-
-            const string url = "https://cdqweb.vercel.app/";
-
-            try
-
-            {
-
-                var chromePath = FindBrowserPath(@"Google\Chrome\Application\chrome.exe");
-
-                if (chromePath != null)
-
-                {
-
-                    Process.Start(new ProcessStartInfo
-
-                    {
-
-                        FileName = chromePath,
-
-                        Arguments = $"--incognito --new-window --app=\"{url}\"",
-
-                        UseShellExecute = true
-
-                    });
-
-                    Console.WriteLine("[Browser] Chrome aberto em modo app/anônimo.");
-
-                    return;
-
-                }
-
-
-
-                var edgePath = FindBrowserPath(@"Microsoft\Edge\Application\msedge.exe");
-
-                if (edgePath != null)
-
-                {
-
-                    Process.Start(new ProcessStartInfo
-
-                    {
-
-                        FileName = edgePath,
-
-                        Arguments = $"--inprivate --new-window --app=\"{url}\"",
-
-                        UseShellExecute = true
-
-                    });
-
-                    Console.WriteLine("[Browser] Edge aberto em modo app/anônimo (InPrivate).");
-
-                    return;
-
-                }
-
-
-
-                // Último recurso: navegador padrão do sistema (sem modo app/anônimo garantido)
-
-                Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
-
-                Console.WriteLine("[Browser] Chrome/Edge não encontrados — aberto no navegador padrão.");
-
-            }
-
-            catch (Exception ex)
-
-            {
-
-                Console.WriteLine($"[Browser] Falha ao abrir o navegador: {ex.Message}");
-
-            }
-
-        }
-
-
-
-        // Procura o executável em Program Files, Program Files (x86) e AppData\Local
-        // (instalação por usuário, comum no Chrome).
-        private static string FindBrowserPath(string relativeExePath)
-        {
-            string[] roots =
-            {
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
-                Environment.GetFolderPath(Environment.SpecialFolder.ProgramFilesX86),
-                Environment.GetEnvironmentVariable("LocalAppData")
-            };
-
-            foreach (var root in roots)
-            {
-                if (string.IsNullOrEmpty(root)) continue;
-                var fullPath = Path.Combine(root, relativeExePath);
-                if (File.Exists(fullPath)) return fullPath;
-            }
-            return null;
-        }
-
-        // -----------------------------------------------------------------------------
-        // AÇÕES DO AUTOTEST (substituem os antigos comandos da ponte WebView2)
-        // -----------------------------------------------------------------------------
-        public class AutoActionRequest
-        {
-            public string action { get; set; }
-        }
-
-        private static void RunSystemAction(string action)
-        {
-            switch (action)
-            {
-                case "OpenDevMgmt":
-                    Process.Start(new ProcessStartInfo("devmgmt.msc") { UseShellExecute = true });
-                    break;
-
-                case "OpenBitlockerSettings":
-                    Process.Start(new ProcessStartInfo("control.exe", "/name Microsoft.BitLockerDriveEncryption") { UseShellExecute = true });
-                    break;
-
-                case "OpenDiskMgmt":
-                    Process.Start(new ProcessStartInfo("diskmgmt.msc") { UseShellExecute = true });
-                    break;
-
-                case "OpenActivationSettings":
-                    Process.Start(new ProcessStartInfo("ms-settings:activation") { UseShellExecute = true });
-                    break;
-
-                case "OpenHDSentinel":
-                    TryOpenHdSentinel();
-                    break;
-
-                default:
-                    throw new ArgumentException($"Ação desconhecida: {action}");
-            }
-        }
-
-        private static void TryOpenHdSentinel()
-        {
-            string[] candidatePaths =
-            {
-                @"C:\Program Files\HDSentinel\HDSentinel.exe",
-                @"C:\Program Files (x86)\HDSentinel\HDSentinel.exe"
-            };
-
-            foreach (var path in candidatePaths)
-            {
-                if (File.Exists(path))
-                {
-                    Process.Start(new ProcessStartInfo(path) { UseShellExecute = true });
-                    return;
-                }
-            }
-            throw new FileNotFoundException("HD Sentinel não encontrado neste equipamento.");
-        }
 
         public void Dispose()
         {

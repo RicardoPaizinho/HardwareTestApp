@@ -4,22 +4,26 @@ using LibreHardwareMonitor.Hardware;
 namespace HardwareTestApp
 {
     // -----------------------------------------------------------------------------
-    // Única instância de Computer (LibreHardwareMonitor) para todo o processo.
+    // ÚNICA instância de LibreHardwareMonitor.Hardware.Computer para todo o processo.
     //
-    // NUNCA crie outro "new Computer()" em nenhum outro arquivo do projeto. O LHM usa
-    // um driver de kernel (Ring0) compartilhado por processo para ler MSRs de CPU/GPU;
-    // se uma segunda instância de Computer for aberta e depois fechada (Close()) enquanto
-    // a instância principal continua "aberta", esse Close() derruba o driver compartilhado
-    // e a instância principal passa a lançar NullReferenceException dentro de
-    // GenericCpu.Update() (ou de qualquer outro hardware) na próxima leitura.
+    // O LibreHardwareMonitor usa um driver de kernel (Ring0) compartilhado pelo
+    // processo inteiro para ler MSRs de CPU/GPU. Quando duas partes do código abrem
+    // suas próprias instâncias de Computer (ex: BackendAgent E SystemInfoCollector.
+    // GetGpuInfo() E HardwareMonitorService), e uma delas chama Close() na sua
+    // instância, isso derruba o driver Ring0 para TODO o processo — inclusive para
+    // as outras instâncias que continuam "abertas". A próxima leitura de sensor
+    // (hardware.Update()) então bate num ponteiro nulo internamente, gerando:
+    //   System.NullReferenceException em LibreHardwareMonitor.Hardware.Cpu.GenericCpu.Update()
     //
-    // Use sempre HardwareMonitorSingleton.Instance para ler sensores, e
-    // HardwareMonitorSingleton.RefreshAll() antes de ler os valores.
+    // Regra do projeto: NUNCA crie outro "new Computer()" em nenhum outro arquivo.
+    // Sempre use HardwareMonitorSingleton.Instance, e só chame Shutdown() uma única
+    // vez, ao encerrar o processo (BackendAgent.Dispose()).
     // -----------------------------------------------------------------------------
     public static class HardwareMonitorSingleton
     {
         private static readonly object _lock = new object();
         private static Computer _computer;
+        private static bool _isOpen = false;
 
         public static Computer Instance
         {
@@ -35,23 +39,25 @@ namespace HardwareTestApp
                             IsGpuEnabled = true,
                             IsBatteryEnabled = true,
                             IsMotherboardEnabled = true,
-                            IsStorageEnabled = true,
-                            IsMemoryEnabled = true
+                            IsStorageEnabled = true
                         };
+                    }
+                    if (!_isOpen)
+                    {
                         _computer.Open();
+                        _isOpen = true;
                     }
                     return _computer;
                 }
             }
         }
 
-        // Atualiza todos os hardwares/sub-hardwares monitorados (CPU, GPU, disco, etc.).
-        // Chame isso antes de ler qualquer sensor para garantir valores atuais.
+        // Atualiza todos os sensores (e sub-hardwares, como núcleos de GPU) de uma vez.
         public static void RefreshAll()
         {
             lock (_lock)
             {
-                if (_computer == null) return;
+                if (_computer == null || !_isOpen) return;
                 try
                 {
                     foreach (var hardware in _computer.Hardware)
@@ -70,13 +76,17 @@ namespace HardwareTestApp
             }
         }
 
-        // Só deve ser chamado UMA vez, no encerramento do processo (Dispose do BackendAgent).
+        // Só deve ser chamado UMA vez, ao encerrar o processo inteiro (nunca no meio
+        // da execução, ou qualquer leitura de sensor em andamento vai quebrar).
         public static void Shutdown()
         {
             lock (_lock)
             {
-                try { _computer?.Close(); } catch { /* ignore */ }
-                _computer = null;
+                if (_computer != null && _isOpen)
+                {
+                    try { _computer.Close(); } catch { /* ignora erro no encerramento */ }
+                    _isOpen = false;
+                }
             }
         }
     }
