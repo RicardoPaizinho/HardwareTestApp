@@ -14,7 +14,49 @@ namespace HardwareTestApp
         string serial;
 
 
+        // O namespace Storage (MSFT_PhysicalDisk) só existe no WinPE se a imagem tiver
+        // o componente opcional WinPE-StorageWMI. Sem ele a consulta lança "Invalid
+        // namespace" — antes isso derrubava toda a leitura do /api/pc-info. Agora cai
+        // pro Win32_DiskDrive (só precisa do WinPE-WMI), que não sabe SSD/HDD.
         public List<string> Verifica()
+        {
+            try
+            {
+                return VerificaStorage();
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Disco] MSFT_PhysicalDisk indisponível ({ex.Message}), usando Win32_DiskDrive.");
+                return VerificaDiskDrive();
+            }
+        }
+
+        private List<string> VerificaDiskDrive()
+        {
+            HddName = new List<String>();
+            try
+            {
+                using var searcher = new ManagementObjectSearcher("SELECT Model, Size, InterfaceType FROM Win32_DiskDrive");
+                foreach (ManagementObject disk in searcher.Get())
+                {
+                    string interfaceType = disk["InterfaceType"]?.ToString() ?? "";
+                    if (interfaceType.Equals("USB", StringComparison.OrdinalIgnoreCase)) continue; //não salva se for usb
+                    ulong sizeBytes = Convert.ToUInt64(disk["Size"] ?? 0UL);
+                    double sizeGB = Math.Round(sizeBytes / Math.Pow(1000, 3), 0);
+                    Console.WriteLine($"Disco: {disk["Model"]}");
+                    Console.WriteLine($"Tamanho: {sizeGB} GB");
+                    Console.WriteLine();
+                    HddName.Add($"{sizeGB} GB {interfaceType}".Trim());
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Disco] Falha ao ler Win32_DiskDrive: {ex.Message}");
+            }
+            return HddName;
+        }
+
+        private List<string> VerificaStorage()
         {
             HddName = new List<String>();
             var scope = new ManagementScope(@"\\.\ROOT\Microsoft\Windows\Storage");

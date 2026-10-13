@@ -27,7 +27,9 @@ namespace HardwareTestApp
         private WebApplication _webApp;
 
         // Caches para alimentar a API HTTP instantaneamente
-        private object _pcInfoCached = null;
+        // Informações fixas do PC (SystemInfo.GetPCInfo), lidas uma única vez
+        private object? _pcInfo = null;
+        private readonly object _pcInfoLock = new object();
         private object _performanceDataCached = null;
         private List<object> _eventLogsCached = new List<object>();
         private int _eventLogsDias = 0; // período (em dias) que está no cache acima
@@ -117,9 +119,15 @@ namespace HardwareTestApp
                 // ==========================================
                 // ENDPOINTS DO MONITOR DE HARDWARE (Exemplos)
                 // ==========================================
-                dynamic pcInfo = SystemInfo.GetPCInfo();
                 //testes();
                 app.MapGet("/api/pc-info", () => {
+                    // Lido uma vez só (ObterPcInfo guarda em cache). Se a leitura falhar
+                    // (ex: WinPE sem algum provedor WMI), responde 503 em vez de derrubar
+                    // o servidor inteiro — antes isso rodava antes do Kestrel subir.
+                    dynamic pcInfo = ObterPcInfo();
+                    if (pcInfo == null)
+                        return Results.Json(new { error = "Não foi possível ler as informações do PC." }, statusCode: 503);
+
                     // Retorne o objeto com os dados estáticos do seu hardware aqui
                     return Results.Json(new
                     {
@@ -415,6 +423,10 @@ namespace HardwareTestApp
                 // (como no erro de certificado). RunAsync() não bloqueia: o Kestrel continua
                 // rodando em background e o resto da inicialização (e o Program.cs) segue.
                 _ = app.RunAsync();
+
+                // Já começa a ler as informações do PC em segundo plano, pra primeira
+                // chamada do front ao /api/pc-info não esperar a leitura inteira.
+                _ = System.Threading.Tasks.Task.Run(() => ObterPcInfo());
             }
             catch (Exception ex)
             {
@@ -631,6 +643,25 @@ namespace HardwareTestApp
             }
         }
 
+        // Lê as informações fixas do PC uma única vez (thread-safe). Em caso de
+        // falha devolve null e tenta de novo na próxima chamada.
+        private object? ObterPcInfo()
+        {
+            lock (_pcInfoLock)
+            {
+                if (_pcInfo != null) return _pcInfo;
+                try
+                {
+                    _pcInfo = SystemInfo.GetPCInfo();
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[PC-Info] Falha ao ler informações do PC: {ex.Message}");
+                }
+                return _pcInfo;
+            }
+        }
+
         private async Task UpdateAllData()
         {
             if (_isUpdating) return;
@@ -643,34 +674,9 @@ namespace HardwareTestApp
                 // dados de temperatura/bateria ficam "congelados" (bug reportado).
                 RefreshHardwareSensors();
 
-                // Alimenta os dados fixos na primeira iteração
-                if (_pcInfoCached == null)
-                {
-                    dynamic pcInfo = SystemInfo.GetPCInfo();
-                    _pcInfoCached = new
-                    {
-                        model = (string)pcInfo.model,
-                        systemFamily = (string)pcInfo.systemFamily,
-                        serialNumber = (string)pcInfo.serialNumber,
-                        processador_Name = (string)pcInfo.processador_Name,
-                        processador_ClockSpeed = (string)pcInfo.processador_ClockSpeed,
-                        processador_MaxClockSpeed = (string)pcInfo.processador_MaxClockSpeed,
-                        processador_NumberOfCores = (string)pcInfo.processador_NumberOfCores,
-                        processador_NumberOfLogicalProcessors = (string)pcInfo.processador_NumberOfLogicalProcessors,
-                        processador_SerialNumber = (string)pcInfo.processador_SerialNumber,
-                        storageLife = _cachedStorageLife,
-                        batteryHealth = 100 - GetSensorValue(HardwareType.Battery, SensorType.Level, "Degradation Level") ?? 0,
-                        memoria = (string)pcInfo.memoria,
-                        armazenamento = pcInfo.armazenamento,
-                        placaVideo = pcInfo.placaVideo,
-                        system = (string)pcInfo.system,
-                        systemBuild = (string)pcInfo.systemBuild,
-                        systemVersion = (string)pcInfo.systemVersion,
-                        systemArchitecture = (string)pcInfo.Architecture,
-                        systemKey = (string)pcInfo.WindowsKey,
-                        lcd = (string)pcInfo.lcd
-                    };
-                }
+                // (Os dados fixos do PC NÃO são lidos aqui: isso duplicava toda a leitura
+                // do /api/pc-info no startup — mensagens repetidas no console e o dobro
+                // de tempo — e o resultado nunca era usado. Ver ObterPcInfo.)
 
                 // Lê os dados de performance dinâmicos do sistema operacional
                 dynamic metrics = await SystemInfo.GetPerformanceMetricsAsync();

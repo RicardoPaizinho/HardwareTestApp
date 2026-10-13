@@ -262,21 +262,29 @@ namespace HardwareTestApp
 
         private void GetGpuInfo()
         {
-            using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_VideoController"))
+            try
             {
-                foreach (ManagementObject mo in searcher.Get())
+                using (var searcher = new ManagementObjectSearcher("SELECT * FROM Win32_VideoController"))
                 {
-                    var ram = mo["AdapterRAM"] as uint?;
-                    Gpus.Add(new Gpu
+                    foreach (ManagementObject mo in searcher.Get())
                     {
-                        Caption = mo["Caption"]?.ToString(),
-                        AdapterRAM = ram.HasValue ? $"{ram.Value / (1024 * 1024):N0} MB" : "N/A",
-                        DriverVersion = mo["DriverVersion"]?.ToString(),
-                        HorizontalResolution = (uint?)mo["CurrentHorizontalResolution"],
-                        VerticalResolution = (uint?)mo["CurrentVerticalResolution"],
-                        RefreshRate = (uint?)mo["CurrentRefreshRate"]
-                    });
+                        var ram = mo["AdapterRAM"] as uint?;
+                        Gpus.Add(new Gpu
+                        {
+                            Caption = mo["Caption"]?.ToString(),
+                            AdapterRAM = ram.HasValue ? $"{ram.Value / (1024 * 1024):N0} MB" : "N/A",
+                            DriverVersion = mo["DriverVersion"]?.ToString(),
+                            HorizontalResolution = (uint?)mo["CurrentHorizontalResolution"],
+                            VerticalResolution = (uint?)mo["CurrentVerticalResolution"],
+                            RefreshRate = (uint?)mo["CurrentRefreshRate"]
+                        });
+                    }
                 }
+            }
+            catch (Exception ex)
+            {
+                // Sem isso, uma falha aqui derrubava toda a leitura do /api/pc-info
+                Console.WriteLine($"[GPU] Falha ao ler Win32_VideoController: {ex.Message}");
             }
         }
 
