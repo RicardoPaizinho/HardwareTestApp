@@ -71,6 +71,10 @@ namespace HardwareTestApp
                 serialNumber = GetSerialNumber(),
 
                 memoria = readSystemInfo.GetMemoryInfo(),
+                // Lista detalhada por pente (fabricante, serial, part number,
+                // clock, tipo, on-board) — GetMemoryInfo() acima já preenche
+                // Memorias como efeito colateral, só reaproveitamos aqui.
+                memoriaDetalhada = readSystemInfo.Memorias,
                 armazenamento = readSystemInfo.HddInfo,
                 placaVideo = VerificarGpu(), //readSystemInfo.Gpus[0]
                 lcd = readSystemInfo.LcdDetalhado,

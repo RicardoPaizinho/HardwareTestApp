@@ -75,6 +75,35 @@ namespace HardwareTestApp
                 }
                 catch { isOK = false; }
 
+                try
+                {
+                    // Adaptador de vídeo caiu pro driver genérico do Windows ("Microsoft
+                    // Basic Display Adapter") em vez do driver do fabricante — o dispositivo
+                    // funciona (sem aceleração/recursos reais) então não gera
+                    // ConfigManagerErrorCode nenhum, precisa de uma checagem própria pelo Name.
+                    //
+                    // NÃO confundir com "Microsoft Basic Render Driver": esse é um adaptador
+                    // virtual (renderização por software/WARP) que sempre existe ao lado da
+                    // GPU de verdade, mesmo com o driver certo instalado — não é problema.
+                    var videoSearcher = new ManagementObjectSearcher("SELECT Name FROM Win32_VideoController");
+                    foreach (ManagementObject video in videoSearcher.Get())
+                    {
+                        var name = video["Name"]?.ToString() ?? "";
+                        if (name.IndexOf("Microsoft Basic Display Adapter", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            isOK = false;
+                            errorCount++;
+                            devices.Add(new
+                            {
+                                name,
+                                code = "GENERIC_VIDEO_DRIVER",
+                                message = "Driver de vídeo genérico do Windows — instale o driver correto do fabricante."
+                            });
+                        }
+                    }
+                }
+                catch { /* se a checagem de vídeo falhar, mantém o resultado dos demais dispositivos */ }
+
                 return new { status = isOK ? "check" : "alert", details = new { errorCount, devices } };
             }
 
@@ -168,7 +197,17 @@ namespace HardwareTestApp
 
                         double healthVal = health.HasValue ? Math.Round(health.Value, 1) : 100;
                         double tempVal = temp.HasValue ? Math.Round(temp.Value, 1) : 0;
-                        bool ok = healthVal >= 70 && (temp == null || tempVal < 60);
+
+                        // Disco em modo RAID (Intel RST/VROC) ou armazenamento eMMC/SD soldado
+                        // (comum em notebooks antigos de 32-64GB) fazem o LibreHardwareMonitor
+                        // não conseguir ler os atributos SMART reais e reportar 0% de vida útil
+                        // — não é o disco realmente no fim da vida (isso já travaria o boot bem
+                        // antes de chegar a 0%), é uma limitação de leitura conhecida. Nesses
+                        // casos liberamos como PASS em vez de reprovar por um dado que sabemos
+                        // que não é confiável, mas deixamos o motivo registrado nos detalhes
+                        // pro técnico ver explicado no card em vez de um 0% sem contexto.
+                        bool healthUnreadable = health.HasValue && health.Value <= 0;
+                        bool ok = healthUnreadable || (healthVal >= 70 && (temp == null || tempVal < 60));
 
                         return new
                         {
@@ -177,7 +216,10 @@ namespace HardwareTestApp
                             {
                                 modelo = hardware.Name,
                                 temp = tempVal,
-                                health = healthVal
+                                health = healthVal,
+                                info = healthUnreadable
+                                    ? "Saúde reportada como 0% — limitação conhecida do LibreHardwareMonitor em discos com controlador em modo RAID ou armazenamento eMMC/SD soldado (comum em notebooks antigos de 32-64GB). Aprovado automaticamente; verifique manualmente se suspeitar de desgaste real."
+                                    : null
                             }
                         };
                     }

@@ -131,6 +131,25 @@ namespace HardwareTestApp
         public string MacAddress { get; set; }
     }
 
+    public class CpuInfo
+    {
+        public string Model { get; set; }
+        public float? UsoPercent { get; set; }          // via LibreHardwareMonitor (não depende de driver Ring0)
+        // Velocidade atual (GHz), média dos núcleos — reflete turbo boost em tempo real.
+        // Também precisa de MSR (PawnIO), assim como a temperatura; sem ele fica null
+        // (diferente do Win32_Processor.CurrentClockSpeed da WMI, que existe mas
+        // normalmente reporta um valor estático/nominal, não a frequência real do momento).
+        public float? ClockAtualGHz { get; set; }
+        // Pico de clock observado desde que o agente abriu (ISensor.Max) — ao contrário do
+        // Win32_Processor.MaxClockSpeed da WMI (valor nominal fixo, sempre o mesmo número,
+        // que é exatamente a reclamação que motivou isso), esse acompanha o turbo boost real.
+        public float? ClockMaximoGHz { get; set; }
+        public float? TemperaturaC { get; set; }        // via LibreHardwareMonitor (precisa do PawnIO) ou fallback WMI
+        public float? TemperaturaMaxima { get; set; }    // pico da sessão (ISensor.Max) — só disponível via LibreHardwareMonitor
+        // "PawnIO" | "WMI-Fallback" | "Indisponivel" — confiabilidade da leitura de temperatura acima
+        public string FonteDados { get; set; } = "Indisponivel";
+    }
+
     public class GpuInfo
     {
         public string Model { get; set; }
@@ -163,6 +182,7 @@ namespace HardwareTestApp
         public List<BluetoothInfo> BluetoothDevices { get; set; }
         public List<LanInfo> LanAdapters { get; set; }
         public GpuInfo Gpu { get; set; }
+        public CpuInfo Cpu { get; set; }
         public SystemOsInfo Sistema { get; set; }
     }
 
@@ -393,7 +413,7 @@ namespace HardwareTestApp
         private static string MapBatteryStatus(string code) => code switch
         {
             "1" => "Descarregando",
-            "2" => "Conectada na tomada (não carregando)",
+            "2" => "Conectada na tomada (carregando)",
             "3" => "Totalmente carregada",
             "4" => "Baixa",
             "5" => "Crítica",
@@ -647,6 +667,165 @@ namespace HardwareTestApp
         }
 
         // -----------------------------------------------------------------------------
+        // CPU — uso (%) e temperatura via LibreHardwareMonitor. O uso não depende de
+        // driver nenhum (LibreHardwareMonitor calcula em cima de contadores do próprio
+        // Windows), mas a temperatura precisa de acesso a MSR via driver Ring0 — daí a
+        // migração pro PawnIO (ver PawnIoBootstrap.cs). Quando o PawnIO não está
+        // disponível, cai pro fallback via WMI (root\WMI, MSAcpi_ThermalZoneTemperature),
+        // que é notoriamente pouco confiável (muita placa-mãe não implementa direito a
+        // zona térmica ACPI) — por isso o FonteDados no DTO, pro front sinalizar isso.
+        // -----------------------------------------------------------------------------
+        public CpuInfo GetCpuInfo()
+        {
+            var info = new CpuInfo();
+
+            var cpu = Query("SELECT * FROM Win32_Processor").FirstOrDefault();
+            if (cpu != null)
+            {
+                info.Model = GetProp(cpu, "Name")?.Trim();
+            }
+
+            try
+            {
+                var computer = HardwareMonitorSingleton.Instance;
+                HardwareMonitorSingleton.RefreshAll();
+
+                var cpuHardware = computer.Hardware.FirstOrDefault(h => h.HardwareType == HardwareType.Cpu);
+                if (cpuHardware != null)
+                {
+                    // Uso (%) — funciona com ou sem PawnIO.
+                    info.UsoPercent = FindSensor(cpuHardware, SensorType.Load, "CPU Total")?.Value;
+
+                    // Temperatura precisa de MSR via driver — só tenta se o bootstrap
+                    // confirmou o PawnIO instalado; sem ele o sensor nem vem populado.
+                    if (PawnIoBootstrap.IsAvailable)
+                    {
+                        // Intel e a maioria das AMD modernas expõem o pacote inteiro;
+                        // AMD mais antigas/Threadripper às vezes só têm a média dos núcleos.
+                        var tempSensor =
+                            FindSensor(cpuHardware, SensorType.Temperature, "CPU Package") ??
+                            FindSensor(cpuHardware, SensorType.Temperature, "Core Average");
+
+                        if (tempSensor != null)
+                        {
+                            info.TemperaturaC = tempSensor.Value;
+                            info.TemperaturaMaxima = tempSensor.Max;
+                        }
+                        else
+                        {
+                            // Último recurso: média dos núcleos individuais ("Core #1", "Core #2"...)
+                            var coreSensors = cpuHardware.Sensors
+                                .Where(s => s.SensorType == SensorType.Temperature
+                                         && s.Name.IndexOf("Core", StringComparison.OrdinalIgnoreCase) >= 0
+                                         && s.Value.HasValue)
+                                .ToList();
+
+                            if (coreSensors.Count > 0)
+                            {
+                                info.TemperaturaC = coreSensors.Average(s => s.Value.Value);
+                                info.TemperaturaMaxima = coreSensors.Max(s => s.Max ?? s.Value.Value);
+                            }
+                        }
+
+                        if (info.TemperaturaC.HasValue) info.FonteDados = "PawnIO";
+
+                        // Clock atual (GHz) dos sensores "CPU Core #N" (SensorType.Clock).
+                        // Ignora "Bus Speed"/"CPU Core Max" quando existirem: só queremos a
+                        // frequência efetiva de cada núcleo, não o clock base do barramento.
+                        var coreClocks = cpuHardware.Sensors
+                            .Where(s => s.SensorType == SensorType.Clock
+                                     && s.Name.IndexOf("Core", StringComparison.OrdinalIgnoreCase) >= 0
+                                     && s.Value.HasValue)
+                            .ToList();
+
+                        if (coreClocks.Count > 0)
+                        {
+                            // Ponderamos pelo uso (%) de cada núcleo em vez de tirar uma média
+                            // simples — sem isso, núcleos ociosos (comum em qualquer CPU
+                            // multi-core com boost por núcleo individual, e ainda mais em CPUs
+                            // híbridas Intel com núcleos E) puxam a média geral pra baixo mesmo
+                            // quando o núcleo realmente em uso está em boost alto — foi exatamente
+                            // isso que fez um i9-14900HX mostrar ~2.46GHz aqui contra ~2.99GHz no
+                            // Gerenciador de Tarefas. É a mesma ideia por trás do "% Processor
+                            // Performance" que o Windows usa (baseado em APERF/MPERF): dar mais
+                            // peso pro que está de fato trabalhando, em vez de tratar núcleo
+                            // ocioso e núcleo ocupado como iguais.
+                            var loadByCoreName = cpuHardware.Sensors
+                                .Where(s => s.SensorType == SensorType.Load && s.Value.HasValue)
+                                .ToDictionary(s => s.Name, s => s.Value.Value);
+
+                            double weightedSum = 0;
+                            double totalWeight = 0;
+                            foreach (var clockSensor in coreClocks)
+                            {
+                                // Usa o uso (%) do mesmo núcleo quando existir; cai pra peso 1
+                                // (equivalente a incluir no cálculo sem favorecer) se essa CPU
+                                // não expuser Load por núcleo individualmente.
+                                double weight = loadByCoreName.TryGetValue(clockSensor.Name, out var load)
+                                    ? Math.Max(load, 1.0)
+                                    : 1.0;
+                                weightedSum += clockSensor.Value.Value * weight;
+                                totalWeight += weight;
+                            }
+
+                            info.ClockAtualGHz = (float)Math.Round((weightedSum / totalWeight) / 1000.0, 2);
+                            info.ClockMaximoGHz = (float)Math.Round(coreClocks.Max(s => s.Max ?? s.Value.Value) / 1000.0, 2);
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[LibreHardwareMonitor] Falha ao ler sensores de CPU: {ex.Message}");
+            }
+
+            if (!info.TemperaturaC.HasValue)
+            {
+                var wmiTemp = GetCpuTemperatureFromWmi();
+                if (wmiTemp.HasValue)
+                {
+                    info.TemperaturaC = wmiTemp;
+                    info.FonteDados = "WMI-Fallback";
+                }
+                else
+                {
+                    info.FonteDados = "Indisponivel";
+                }
+            }
+
+            return info;
+        }
+
+        private static ISensor FindSensor(IHardware hardware, SensorType type, string nameContains)
+        {
+            return hardware.Sensors.FirstOrDefault(s =>
+                s.SensorType == type &&
+                s.Name.IndexOf(nameContains, StringComparison.OrdinalIgnoreCase) >= 0 &&
+                s.Value.HasValue);
+        }
+
+        // MSAcpi_ThermalZoneTemperature (root\WMI) reporta em décimos de Kelvin.
+        // Fallback de última instância quando não há PawnIO/driver Ring0 disponível.
+        private static float? GetCpuTemperatureFromWmi()
+        {
+            try
+            {
+                var zone = Query("SELECT * FROM MSAcpi_ThermalZoneTemperature", @"root\WMI").FirstOrDefault();
+                if (zone == null) return null;
+
+                if (uint.TryParse(GetProp(zone, "CurrentTemperature"), out uint deciKelvin) && deciKelvin > 0)
+                {
+                    return (float)Math.Round(deciKelvin / 10.0 - 273.15, 1);
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[WMI] Falha ao ler MSAcpi_ThermalZoneTemperature: {ex.Message}");
+            }
+            return null;
+        }
+
+        // -----------------------------------------------------------------------------
         // SISTEMA OPERACIONAL
         // -----------------------------------------------------------------------------
         public SystemOsInfo GetSystemInfo()
@@ -718,6 +897,7 @@ namespace HardwareTestApp
                 BluetoothDevices = GetBluetoothDevices(),
                 LanAdapters = GetLanAdapters(),
                 Gpu = GetGpuInfo(),
+                Cpu = GetCpuInfo(),
                 Sistema = GetSystemInfo()
             };
         }

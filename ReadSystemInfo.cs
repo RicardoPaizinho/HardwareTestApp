@@ -384,6 +384,7 @@ namespace HardwareTestApp
                 case 0x14: return "DDR";
                 case 0x15: return "DDR2";
                 case 0x18: return "DDR3";
+                case 0x1D: return "LPDDR3";
                 case 0x1A: return "DDR4";
                 case 0x1E: return "LPDDR4";
                 case 0x20: return "DDR5";
@@ -542,11 +543,12 @@ namespace HardwareTestApp
             else if (hRes >= 3840) resType = "4K UHD";
             else if (hRes >= 2880) resType = "2.8K QHD+";
             else if (hRes >= 2560) resType = "QHD/WQXGA";
+            else if (hRes >= 2240 & vRes == 1400) resType = "2.2K";
             else if (hRes >= 1920 & vRes == 1200) resType = "WUXGA";
             else if (hRes >= 1920 & vRes == 1080) resType = "FHD";
             else if (hRes >= 1366) resType = "HD";
 
-            //2240x1400	fhd ou 2.2k
+
 
             string refresh = "";
             if (primaryGpu.RefreshRate > 60)

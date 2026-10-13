@@ -30,10 +30,32 @@ namespace HardwareTestApp
         private object _pcInfoCached = null;
         private object _performanceDataCached = null;
         private List<object> _eventLogsCached = new List<object>();
+        private int _eventLogsDias = 0; // período (em dias) que está no cache acima
+        private readonly object _eventLogsLock = new object();
+
+        // Progresso dos testes salvo localmente (ver seção "/api/progress" abaixo) —
+        // sobrevive a fechamentos inesperados do navegador/app, já que fica em disco.
+        private static readonly string ProgressFilePath = Path.Combine(Path.GetTempPath(), "cdqweb_test_progress.json");
 
         public BackendAgent()
         {
             si = new SystemInfo();
+
+            // 0. Garante o driver PawnIO (substituto do WinRing0, bloqueado pelo
+            // Windows/Defender em máquinas novas) ANTES de abrir o LibreHardwareMonitor —
+            // sem isso, sensores de temperatura de CPU que dependem de MSR não respondem.
+            // Bloqueia por no máximo alguns segundos (ver PawnIoBootstrap.InstallTimeout);
+            // se falhar ou não achar o instalador, só loga e segue — o resto do agente
+            // (bateria, USB, teclado, etc.) não depende disso pra funcionar.
+            try
+            {
+                var pawnIoStatus = PawnIoBootstrap.EnsureInstalledAsync().GetAwaiter().GetResult();
+                Console.WriteLine($"[PawnIO] Status: {pawnIoStatus}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[PawnIO] Falha inesperada no bootstrap: {ex.Message}");
+            }
 
             // 1. Inicializa o monitoramento de Hardware nativo
             InitHardwareMonitor();
@@ -45,7 +67,7 @@ namespace HardwareTestApp
             // de Eventos uma vez no startup — antes UpdateLogsCache() existia mas
             // nunca era chamado em lugar nenhum, então o cache ficava sempre vazio.
             // Roda em background (Task.Run) porque ler o EventLog pode ser lento.
-            _ = System.Threading.Tasks.Task.Run(() => UpdateLogsCache());
+            _ = System.Threading.Tasks.Task.Run(() => UpdateLogsCache(30));
 
             // 3. Inicia o Timer de desempenho (atualiza a cada 2 segundos)
             _monitorTimer = new System.Threading.Timer(async _ => await UpdateAllData(), null, 0, 2000);
@@ -118,6 +140,10 @@ namespace HardwareTestApp
                         batteryHealth = 100 - GetSensorValue(HardwareType.Battery, SensorType.Level, "Degradation Level") ?? 0,
 
                         memoria = (string)pcInfo.memoria,
+                        // Lista detalhada por pente de memória (fabricante, serial,
+                        // part number, clock, tipo, on-board) — usada pelo relatório
+                        // final pra preencher o campo "memoriaDetalhada" no banco.
+                        memoriaDetalhada = pcInfo.memoriaDetalhada,
                         //armazenamento = pcInfo.armazenamento,
                         armazenamento = pcInfo.armazenamento,
                         placaVideo = pcInfo.placaVideo,
@@ -149,7 +175,7 @@ namespace HardwareTestApp
                         cpu = 0,
                         memory = 0,
                         disk = 0,
-                        realtime = new { cpuTemp = 0, gpuTemp = 0, storageTemp = 0, batteryLevel = 0 }
+                        realtime = new { cpuTemp = 0, gpuTemp = 0, gpuUsage = 0, storageTemp = 0, batteryLevel = 0 }
                     });
                 });
 
@@ -161,6 +187,30 @@ namespace HardwareTestApp
                         var collector = new SystemInfoCollector();
                         var baterias = collector.GetBatteries();
                         return Results.Json(baterias);
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.Json(new { error = ex.Message }, statusCode: 500);
+                    }
+                });
+
+                // ==========================================
+                //     TEMPERATURA/USO DE CPU (Monitor.vue)
+                // ==========================================
+                // Leitura sob demanda (sem cache), mesmo padrão do /api/battery: o valor
+                // muda a cada chamada e a chamada em si já é rápida (GetCpuInfo só lê
+                // sensores já abertos pelo HardwareMonitorSingleton, não abre nada novo).
+                // Ficou como rota dedicada em vez de entrar no payload do /api/performance
+                // (que já é pollado a cada 2s só pra telemetria leve do gráfico) porque
+                // carrega campos extras que não fazem sentido nesse ritmo (Model,
+                // TemperaturaMaxima) e porque segue o padrão de DTO do SystemInfoCollector
+                // (igual GetGpuInfo()), que o /api/performance não usa.
+                app.MapGet("/api/cpu-info", () => {
+                    try
+                    {
+                        var collector = new SystemInfoCollector();
+                        var cpuInfo = collector.GetCpuInfo();
+                        return Results.Json(cpuInfo);
                     }
                     catch (Exception ex)
                     {
@@ -227,20 +277,94 @@ namespace HardwareTestApp
                 });
 
                 // ==========================================
+                //     DISPOSITIVOS PRESENTES (Teste Final — TestesView.vue)
+                // ==========================================
+                // Diz se o notebook tem leitor biométrico e tela touch, pra montar
+                // a lista do teste sequencial sem incluir o que não existe.
+                app.MapGet("/api/devices/presence", () => Results.Json(DetectarDispositivos()));
+
+                // ==========================================
+                //     DETALHES PRO RELATÓRIO (testes LCD e Rede)
+                // ==========================================
+                // Resolução/frequência/ID do painel e nome do adaptador Bluetooth —
+                // o front junta isso ao PASS/FAIL salvo no banco.
+                app.MapGet("/api/report-details", () => Results.Json(LerDetalhesRelatorio()));
+
+                // ==========================================
                 //     HISTÓRICO DE FALHAS (EventLogAnalyzer.vue)
                 // ==========================================
                 // Serve o cache computado no startup (UpdateLogsCache, chamado
                 // no construtor) — antes ficava calculado só na memória sem
                 // nenhum endpoint expondo pro front (mesmo problema do auto-diagnóstico).
-                app.MapGet("/api/eventlog", () => {
+                // "?dias=30|60|90|120" escolhe o período (padrão 30). Se o período
+                // pedido for diferente do que está em cache, refaz a busca.
+                app.MapGet("/api/eventlog", (int? dias) => {
+                    int periodo = NormalizarDiasEventLog(dias);
+                    if (periodo != _eventLogsDias) UpdateLogsCache(periodo);
                     return Results.Json(_eventLogsCached);
                 });
 
                 // Permite reexecutar a busca no Visualizador de Eventos sob demanda
                 // (botão "ATUALIZAR" do EventLogAnalyzer.vue).
-                app.MapPost("/api/eventlog/refresh", () => {
-                    UpdateLogsCache();
+                app.MapPost("/api/eventlog/refresh", (int? dias) => {
+                    UpdateLogsCache(NormalizarDiasEventLog(dias));
                     return Results.Json(_eventLogsCached);
+                });
+
+                // ==========================================
+                //     PROGRESSO LOCAL DOS TESTES (store.js)
+                // ==========================================
+                // Guarda o estado dos testes (resultados + serial da placa-mãe pra
+                // conferência) num arquivo temporário — se o técnico fechar a aba ou o
+                // app cair no meio do diagnóstico, ao reabrir a gente recupera de onde
+                // parou em vez de voltar do zero. O front decide o formato do JSON e só
+                // confia no valor de volta se o serial bater com o equipamento atual
+                // (globalState.tryRestoreProgress); aqui só armazenamos/servimos o
+                // conteúdo cru, sem entender sua estrutura.
+                app.MapGet("/api/progress", () => {
+                    try
+                    {
+                        if (!File.Exists(ProgressFilePath))
+                            return Results.Json(new { found = false });
+
+                        var json = File.ReadAllText(ProgressFilePath);
+                        return Results.Content($"{{\"found\":true,\"data\":{json}}}", "application/json");
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Progresso] Falha ao ler progresso salvo: {ex.Message}");
+                        return Results.Json(new { found = false });
+                    }
+                });
+
+                app.MapPost("/api/progress", async (HttpContext context) => {
+                    try
+                    {
+                        using var reader = new StreamReader(context.Request.Body);
+                        var body = await reader.ReadToEndAsync();
+                        await File.WriteAllTextAsync(ProgressFilePath, body);
+                        return Results.Json(new { success = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Progresso] Falha ao salvar progresso: {ex.Message}");
+                        return Results.Json(new { success = false, message = ex.Message }, statusCode: 500);
+                    }
+                });
+
+                // Chamado depois que o relatório final é enviado com sucesso pro banco
+                // remoto (não faz mais sentido restaurar um teste que já foi salvo).
+                app.MapDelete("/api/progress", () => {
+                    try
+                    {
+                        if (File.Exists(ProgressFilePath)) File.Delete(ProgressFilePath);
+                        return Results.Json(new { success = true });
+                    }
+                    catch (Exception ex)
+                    {
+                        Console.WriteLine($"[Progresso] Falha ao limpar progresso: {ex.Message}");
+                        return Results.Json(new { success = false, message = ex.Message }, statusCode: 500);
+                    }
                 });
 
                 // ==========================================
@@ -311,7 +435,7 @@ namespace HardwareTestApp
             const string url = "https://api.cdqweb.com.br";
             try
             {
-                var chromePath = FindBrowserPath(@"Google\Chrome\Application\chrome.exe");
+                var chromePath = FindBrowserPath("chrome.exe", @"Google\Chrome\Application\chrome.exe");
                 if (chromePath != null)
                 {
                     Process.Start(new ProcessStartInfo
@@ -324,7 +448,7 @@ namespace HardwareTestApp
                     return;
                 }
 
-                var edgePath = FindBrowserPath(@"Microsoft\Edge\Application\msedge.exe");
+                var edgePath = FindBrowserPath("msedge.exe", @"Microsoft\Edge\Application\msedge.exe");
                 if (edgePath != null)
                 {
                     Process.Start(new ProcessStartInfo
@@ -347,10 +471,15 @@ namespace HardwareTestApp
             }
         }
 
-        // Procura o executável em Program Files, Program Files (x86) e AppData\Local
-        // (instalação por usuário, comum no Chrome).
-        private static string FindBrowserPath(string relativeExePath)
+        // Procura o executável de duas formas:
+        //  1) Registro do Windows (App Paths) — método oficial que funciona não
+        //     importa onde o navegador foi instalado (padrão, custom, por usuário).
+        //  2) Caminhos fixos (Program Files / AppData\Local) como último recurso.
+        private static string FindBrowserPath(string exeName, string relativeExePath)
         {
+            var fromRegistry = FindBrowserPathFromRegistry(exeName);
+            if (fromRegistry != null) return fromRegistry;
+
             string[] roots =
             {
                 Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
@@ -363,6 +492,39 @@ namespace HardwareTestApp
                 if (string.IsNullOrEmpty(root)) continue;
                 var fullPath = Path.Combine(root, relativeExePath);
                 if (File.Exists(fullPath)) return fullPath;
+            }
+            return null;
+        }
+
+        // App Paths é a chave que o próprio instalador do Chrome/Edge registra
+        // no Windows apontando pro executável real — funciona mesmo se o
+        // navegador foi instalado num caminho fora do padrão. Checamos tanto
+        // HKLM (instalação para todos os usuários) quanto HKCU (por usuário,
+        // comum quando o Chrome é instalado sem permissão de admin).
+        private static string FindBrowserPathFromRegistry(string exeName)
+        {
+            string[] registryRoots =
+            {
+                $@"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\{exeName}",
+                $@"SOFTWARE\WOW6432Node\Microsoft\Windows\CurrentVersion\App Paths\{exeName}"
+            };
+
+            foreach (var keyPath in registryRoots)
+            {
+                try
+                {
+                    using var hklmKey = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(keyPath);
+                    var hklmValue = hklmKey?.GetValue(null) as string;
+                    if (!string.IsNullOrEmpty(hklmValue) && File.Exists(hklmValue)) return hklmValue;
+
+                    using var hkcuKey = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(keyPath);
+                    var hkcuValue = hkcuKey?.GetValue(null) as string;
+                    if (!string.IsNullOrEmpty(hkcuValue) && File.Exists(hkcuValue)) return hkcuValue;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[Browser] Falha ao consultar registro ({keyPath}): {ex.Message}");
+                }
             }
             return null;
         }
@@ -398,6 +560,10 @@ namespace HardwareTestApp
 
                 case "OpenActivationSettings":
                     Process.Start(new ProcessStartInfo("ms-settings:activation") { UseShellExecute = true });
+                    break;
+
+                case "OpenFingerprintEnrollment":
+                    Process.Start(new ProcessStartInfo("ms-settings:signinoptions-launchfingerprintenrollment") { UseShellExecute = true });
                     break;
 
                 case "OpenHDSentinel":
@@ -519,7 +685,19 @@ namespace HardwareTestApp
                         gpuTemp = GetSensorValue(HardwareType.GpuIntel, SensorType.Temperature, "") ??
                                   GetSensorValue(HardwareType.GpuNvidia, SensorType.Temperature, "") ??
                                   GetSensorValue(HardwareType.GpuAmd, SensorType.Temperature, "") ?? 0,
+                        // "GPU Core" é o sensor de uso do motor 3D principal (o mesmo
+                        // número que aparece como uso de GPU no Gerenciador de Tarefas),
+                        // não depende do PawnIO — funciona com ou sem ele instalado.
+                        gpuUsage = GetSensorValue(HardwareType.GpuIntel, SensorType.Load, "Core") ??
+                                   GetSensorValue(HardwareType.GpuNvidia, SensorType.Load, "Core") ??
+                                   GetSensorValue(HardwareType.GpuAmd, SensorType.Load, "Core") ?? 0,
                         storageTemp = GetSensorValue(HardwareType.Storage, SensorType.Temperature, "Temperature") ?? 0,
+                        // Nome do mesmo disco físico já usado pra ler storageTemp acima (o
+                        // primeiro Storage que o LibreHardwareMonitor encontra) — em notebooks
+                        // com um único SSD/NVMe isso é sempre o disco de sistema (C:). Em
+                        // desktops com múltiplos discos não há garantia de que seja o C:
+                        // especificamente (não estamos resolvendo a letra de unidade via WMI).
+                        storageModel = GetHardwareName(HardwareType.Storage),
                         batteryLevel = GetSensorValue(HardwareType.Battery, SensorType.Level, "Charge Level") ?? 0,
                     }
                 };
@@ -531,24 +709,196 @@ namespace HardwareTestApp
             finally { _isUpdating = false; }
         }
 
-        private void UpdateLogsCache()
+        // Antes o filtro era `EntryType == 0 || EntryType == 1`: EventLogEntryType nunca vale 0,
+        // então isso só pegava os últimos 30 eventos "Error" do log System, sem distinguir
+        // tela azul de qualquer erro genérico de driver/serviço — por isso a tela ficava poluída.
+        // Agora filtra só pelas fontes/IDs que o Windows realmente usa pra registrar
+        // bugcheck (tela azul) e desligamento anormal.
+        private static bool IsCriticalCrashEvent(EventLogEntry e)
         {
+            var source = e.Source ?? "";
+            int id = (int)(e.InstanceId & 0xFFFF);
+
+            if (source.Equals("BugCheck", StringComparison.OrdinalIgnoreCase)) return true;
+            if (source.Equals("Microsoft-Windows-WER-SystemErrorReporting", StringComparison.OrdinalIgnoreCase) && id == 1001) return true;
+            if (source.Equals("Microsoft-Windows-Kernel-Power", StringComparison.OrdinalIgnoreCase) && id == 41) return true;
+            if (source.Equals("EventLog", StringComparison.OrdinalIgnoreCase) && id == 6008) return true;
+            // "O driver de vídeo X parou de responder e foi recuperado" (TDR). Não é tela
+            // azul, mas é o único evento que traz o NOME do driver de vídeo envolvido —
+            // o front usa isso pra apontar se o 0x116/0x117 veio da dedicada ou da onboard.
+            if (IsDisplayTdrEvent(source, id)) return true;
+
+            return false;
+        }
+
+        [DllImport("user32.dll")]
+        private static extern int GetSystemMetrics(int nIndex);
+        private const int SM_MAXIMUMTOUCHES = 95; // > 0 quando há digitalizador touch
+
+        // Leitor biométrico = dispositivo PnP da classe "Biometric" (o Windows Hello
+        // usa essa classe). Sem driver instalado ele aparece como "dispositivo
+        // desconhecido", fora dessa classe — nesse caso conta como não detectado,
+        // e o front pede pro técnico reparar antes do Teste Final.
+        private static object DetectarDispositivos()
+        {
+            var leitores = new List<object>();
             try
             {
-                EventLog systemLog = new EventLog("System");
-                _eventLogsCached = systemLog.Entries.Cast<EventLogEntry>()
-                    .Where(e => (int)e.EntryType == 0 || (int)e.EntryType == 1)
-                    .OrderByDescending(e => e.TimeGenerated)
-                    .Take(30)
-                    .Select(e => new {
-                        level = (int)e.EntryType == 0 ? "Critical" : "Error",
-                        eventId = e.InstanceId,
-                        date = e.TimeGenerated.ToString("G"),
-                        origin = e.Source,
-                        msg = e.Message
-                    }).Cast<object>().ToList();
+                using var searcher = new System.Management.ManagementObjectSearcher(
+                    "SELECT Name, ConfigManagerErrorCode FROM Win32_PnPEntity WHERE PNPClass = 'Biometric'");
+                foreach (System.Management.ManagementObject mo in searcher.Get())
+                {
+                    leitores.Add(new {
+                        nome = mo["Name"]?.ToString() ?? "Leitor biométrico",
+                        // 0 = funcionando; outro valor = erro de driver/dispositivo
+                        codigoErro = Convert.ToInt32(mo["ConfigManagerErrorCode"] ?? 0)
+                    });
+                }
             }
-            catch { }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Dispositivos] Falha ao consultar leitor biométrico: {ex.Message}");
+            }
+
+            int toquesMaximos = 0;
+            try { toquesMaximos = GetSystemMetrics(SM_MAXIMUMTOUCHES); } catch { }
+
+            return new {
+                fingerprint = leitores.Count > 0,
+                leitoresBiometricos = leitores,
+                touchscreen = toquesMaximos > 0,
+                toquesMaximos
+            };
+        }
+
+        private static object LerDetalhesRelatorio()
+        {
+            int? largura = null, altura = null, frequencia = null;
+            try
+            {
+                using var vc = new System.Management.ManagementObjectSearcher(
+                    "SELECT CurrentHorizontalResolution, CurrentVerticalResolution, CurrentRefreshRate FROM Win32_VideoController");
+                foreach (System.Management.ManagementObject mo in vc.Get())
+                {
+                    if (mo["CurrentHorizontalResolution"] == null) continue; // GPU sem saída ativa
+                    largura = Convert.ToInt32(mo["CurrentHorizontalResolution"]);
+                    altura = Convert.ToInt32(mo["CurrentVerticalResolution"]);
+                    frequencia = mo["CurrentRefreshRate"] != null ? Convert.ToInt32(mo["CurrentRefreshRate"]) : null;
+                    break;
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[Relatório] Falha ao ler resolução: {ex.Message}"); }
+
+            // ID do painel no formato do Gerenciador de Dispositivos
+            // (ex: DISPLAY\LGD05F2\4&2A06D433&0&UID8388688). O InstanceName do
+            // WmiMonitorID é igual, só com um sufixo "_0" no fim.
+            string? idTela = null;
+            string? nomeTela = null;
+            try
+            {
+                using var mon = new System.Management.ManagementObjectSearcher(@"root\WMI", "SELECT InstanceName, UserFriendlyName FROM WmiMonitorID");
+                foreach (System.Management.ManagementObject mo in mon.Get())
+                {
+                    var instancia = mo["InstanceName"]?.ToString();
+                    if (string.IsNullOrEmpty(instancia)) continue;
+                    idTela = System.Text.RegularExpressions.Regex.Replace(instancia, @"_\d+$", "").ToUpperInvariant();
+                    if (mo["UserFriendlyName"] is ushort[] raw)
+                        nomeTela = new string(raw.Where(c => c != 0).Select(c => (char)c).ToArray()).Trim();
+                    break; // o primeiro costuma ser o painel interno do notebook
+                }
+            }
+            catch (Exception ex) { Console.WriteLine($"[Relatório] Falha ao ler ID do monitor: {ex.Message}"); }
+
+            // Bluetooth: o adaptador de rede PAN ("Bluetooth Device (Personal Area
+            // Network)") é o nome que aparece junto dos adaptadores de rede; sem ele,
+            // usa o primeiro rádio Bluetooth do Gerenciador de Dispositivos.
+            string? bluetooth = System.Net.NetworkInformation.NetworkInterface.GetAllNetworkInterfaces()
+                .FirstOrDefault(ni => (ni.Description ?? "").Contains("Bluetooth", StringComparison.OrdinalIgnoreCase))
+                ?.Description;
+            if (bluetooth == null)
+            {
+                try
+                {
+                    using var bt = new System.Management.ManagementObjectSearcher(
+                        "SELECT Name FROM Win32_PnPEntity WHERE PNPClass = 'Bluetooth' AND ConfigManagerErrorCode = 0");
+                    foreach (System.Management.ManagementObject mo in bt.Get())
+                    {
+                        var nome = mo["Name"]?.ToString() ?? "";
+                        if (nome.Contains("Enumerator", StringComparison.OrdinalIgnoreCase)) continue;
+                        bluetooth = nome;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            return new {
+                tela = new { largura, altura, frequencia, id = idTela, nome = nomeTela },
+                bluetooth
+            };
+        }
+
+        private static bool IsDisplayTdrEvent(string source, int id) =>
+            source.Equals("Display", StringComparison.OrdinalIgnoreCase) && id == 4101;
+
+        private static readonly int[] DiasEventLogPermitidos = { 30, 60, 90, 120 };
+        private const int MaxEventosEventLog = 500;
+
+        private static int NormalizarDiasEventLog(int? dias) =>
+            dias.HasValue && DiasEventLogPermitidos.Contains(dias.Value) ? dias.Value : 30;
+
+        // Busca os eventos de falha dos últimos "dias" dias. Percorre o log do mais
+        // novo pro mais antigo (Entries vem em ordem cronológica) e para assim que
+        // passa da data de corte — bem mais rápido do que varrer o log inteiro.
+        private void UpdateLogsCache(int dias)
+        {
+            lock (_eventLogsLock)
+            {
+                try
+                {
+                    var corte = DateTime.Now.AddDays(-dias);
+                    var resultado = new List<object>();
+
+                    using var systemLog = new EventLog("System");
+                    var entries = systemLog.Entries;
+                    for (int i = entries.Count - 1; i >= 0 && resultado.Count < MaxEventosEventLog; i--)
+                    {
+                        EventLogEntry e;
+                        try { e = entries[i]; } catch { continue; } // log pode girar durante a leitura
+                        if (e.TimeGenerated < corte) break;
+                        if (!IsCriticalCrashEvent(e)) continue;
+
+                        var dados = e.ReplacementStrings ?? Array.Empty<string>();
+                        string? driver = null;
+                        if (IsDisplayTdrEvent(e.Source ?? "", (int)(e.InstanceId & 0xFFFF)) && dados.Length > 0
+                            && !string.IsNullOrWhiteSpace(dados[0]))
+                        {
+                            driver = dados[0].Trim();
+                            if (!driver.EndsWith(".sys", StringComparison.OrdinalIgnoreCase)) driver += ".sys";
+                        }
+
+                        resultado.Add(new {
+                            level = "Critical",
+                            eventId = e.InstanceId,
+                            date = e.TimeGenerated.ToString("G"),
+                            dateIso = e.TimeGenerated.ToString("yyyy-MM-ddTHH:mm:ss"),
+                            origin = e.Source,
+                            msg = e.Message,
+                            // Parâmetros crus do evento (ex: Kernel-Power 41 traz o BugcheckCode
+                            // em decimal na posição 0 quando o desligamento foi uma tela azul)
+                            dados,
+                            driver
+                        });
+                    }
+
+                    _eventLogsCached = resultado;
+                    _eventLogsDias = dias;
+                }
+                catch (Exception ex)
+                {
+                    Console.WriteLine($"[EventLog] Falha ao ler o log System: {ex.Message}");
+                }
+            }
         }
 
         // Chama Update() em cada hardware monitorado (e em seus sub-hardwares, como os
@@ -557,6 +907,16 @@ namespace HardwareTestApp
         private void RefreshHardwareSensors()
         {
             HardwareMonitorSingleton.RefreshAll();
+        }
+
+        private string GetHardwareName(HardwareType hwType)
+        {
+            if (_computer == null) return null;
+            foreach (var hardware in _computer.Hardware)
+            {
+                if (hardware.HardwareType == hwType) return hardware.Name;
+            }
+            return null;
         }
 
         private float? GetSensorValue(HardwareType hwType, SensorType sType, string sensorName = null)

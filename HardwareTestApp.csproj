@@ -24,15 +24,22 @@
 		<None Remove="FormSplash.csold" />
 	</ItemGroup>
 
+	<!-- Instaladores redistribuíveis embutidos (ex: PawnIO_setup.exe) — copiados pra
+	     junto do .exe publicado, de onde PawnIoBootstrap.cs sabe procurá-los. Se a pasta
+	     estiver vazia (só o README.txt), isso não copia nada além dele — sem erro. -->
+	<ItemGroup>
+		<None Include="Redist\**" CopyToOutputDirectory="PreserveNewest" />
+	</ItemGroup>
+
 	<ItemGroup>
 		<PackageReference Include="System.Collections" Version="4.3.0" />
-		<PackageReference Include="System.Management" Version="10.0.9" />
+		<PackageReference Include="System.Management" Version="10.0.12" />
 		
 		<PackageReference Include="LibreHardwareMonitorLib" Version="0.9.6" />
 		
 		<PackageReference Include="Microsoft-WindowsAPICodePack-Shell" Version="1.1.5" />
-		<PackageReference Include="Newtonsoft.Json" Version="13.0.3" />
-		<PackageReference Include="Vortice.DXGI" Version="3.6.2" />
+		<PackageReference Include="Newtonsoft.Json" Version="13.0.4" />
+		<PackageReference Include="Vortice.DXGI" Version="3.8.3" />
 		
 		</ItemGroup>
 
