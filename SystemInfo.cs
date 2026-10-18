@@ -79,6 +79,14 @@ namespace HardwareTestApp
                 placaVideo = VerificarGpu(), //readSystemInfo.Gpus[0]
                 lcd = readSystemInfo.LcdDetalhado,
 
+                // Campos do relatório que o ReadSystemInfo já lia mas não eram
+                // repassados (iam em branco pro banco)
+                fabricante = readSystemInfo.Manufacturer,
+                systemSkuNumber = readSystemInfo.SystemSKUNumber,
+                biosVersion = readSystemInfo.BiosVersion,
+                windowsAtivado = readSystemInfo.IsWindowsActivated ? "Sim" : "Não",
+                discosDetalhado = readSystemInfo.DiscosDetalhados,
+
             };
         }
 
@@ -259,8 +267,14 @@ namespace HardwareTestApp
         /// </summary>
         // --- DISCO (ATIVIDADE DO SISTEMA) ---
         // Esta versão usa contadores de performance, que não travam o PC
+        // No WinPE os contadores de desempenho do Windows não existem ("Category
+        // 'PhysicalDisk' does not exist"). Depois da primeira falha não tenta mais —
+        // antes o erro era impresso a cada 2s, poluindo o console.
+        private static bool _contadorDiscoIndisponivel = false;
+
         public static async Task<double> GetTotalDiskUsageAsync()
         {
+            if (_contadorDiscoIndisponivel) return 0.0;
             return await Task.Run(async () =>
             {
                 try
@@ -273,6 +287,13 @@ namespace HardwareTestApp
 
                     // O Windows às vezes reporta > 100% se houver picos, então limitamos
                     return Math.Min(Math.Max(Math.Round(value, 2), 0), 100);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    // Categoria/contador inexistente: não adianta tentar de novo
+                    _contadorDiscoIndisponivel = true;
+                    Console.WriteLine($"[Disco] Uso de disco indisponível neste sistema ({ex.Message}). Mostrando 0%.");
+                    return 0.0;
                 }
                 catch (Exception ex)
                 {

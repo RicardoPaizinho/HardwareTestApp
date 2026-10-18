@@ -162,7 +162,15 @@ namespace HardwareTestApp
                         systemArchitecture = (string)pcInfo.Architecture,
                         systemKey = (string)pcInfo.WindowsKey,
 
-                        lcd = (string)pcInfo.lcd
+                        lcd = (string)pcInfo.lcd,
+
+                        // Identificação completa do equipamento pro relatório
+                        // (store.js -> buildHardwarePayload)
+                        fabricante = (string)pcInfo.fabricante,
+                        systemSkuNumber = (string)pcInfo.systemSkuNumber,
+                        biosVersion = (string)pcInfo.biosVersion,
+                        windowsAtivado = (string)pcInfo.windowsAtivado,
+                        discosDetalhado = pcInfo.discosDetalhado
                         // ... adicione as propriedades que o seu front espera ...
                     });
                 });
@@ -447,6 +455,16 @@ namespace HardwareTestApp
             const string url = "https://api.cdqweb.com.br";
             try
             {
+                // navegador.txt ao lado do agente (1ª linha = caminho do .exe) tem
+                // prioridade — útil em WinPE/PCs onde o navegador fica num lugar fora do padrão.
+                var configurado = LerNavegadorConfigurado();
+                if (configurado != null)
+                {
+                    Process.Start(new ProcessStartInfo { FileName = configurado, Arguments = $"\"{url}\"", UseShellExecute = true });
+                    Console.WriteLine($"[Browser] Aberto com o navegador de navegador.txt: {configurado}");
+                    return;
+                }
+
                 var chromePath = FindBrowserPath("chrome.exe", @"Google\Chrome\Application\chrome.exe");
                 if (chromePath != null)
                 {
@@ -473,14 +491,53 @@ namespace HardwareTestApp
                     return;
                 }
 
-                // Último recurso: navegador padrão do sistema (sem modo app/anônimo garantido)
+                // Opera e Firefox (o WinPE do Sergei Strelec, por exemplo, traz o Opera)
+                var operaPath = FindBrowserPath("opera.exe", @"Opera\launcher.exe")
+                                ?? FindBrowserPath("opera.exe", @"Programs\Opera\launcher.exe");
+                if (operaPath != null)
+                {
+                    Process.Start(new ProcessStartInfo { FileName = operaPath, Arguments = $"--private \"{url}\"", UseShellExecute = true });
+                    Console.WriteLine("[Browser] Opera aberto em janela privada.");
+                    return;
+                }
+
+                var firefoxPath = FindBrowserPath("firefox.exe", @"Mozilla Firefox\firefox.exe");
+                if (firefoxPath != null)
+                {
+                    Process.Start(new ProcessStartInfo { FileName = firefoxPath, Arguments = $"-private-window \"{url}\"", UseShellExecute = true });
+                    Console.WriteLine("[Browser] Firefox aberto em janela privada.");
+                    return;
+                }
+
+                // Último recurso: navegador padrão do sistema (sem modo app/anônimo garantido).
+                // No WinPE normalmente não há navegador padrão registrado e nada abre.
                 Process.Start(new ProcessStartInfo { FileName = url, UseShellExecute = true });
-                Console.WriteLine("[Browser] Chrome/Edge não encontrados — aberto no navegador padrão.");
+                Console.WriteLine("[Browser] Chrome/Edge/Opera/Firefox não encontrados — tentei o navegador padrão.");
+                Console.WriteLine($"[Browser] Se nada abriu, abra um navegador e acesse {url}");
+                Console.WriteLine("[Browser] (ou coloque o caminho do navegador em navegador.txt, ao lado do agente)");
             }
             catch (Exception ex)
             {
                 Console.WriteLine($"[Browser] Falha ao abrir o navegador: {ex.Message}");
             }
+        }
+
+        private static string? LerNavegadorConfigurado()
+        {
+            try
+            {
+                var arquivo = Path.Combine(AppContext.BaseDirectory, "navegador.txt");
+                if (!File.Exists(arquivo)) return null;
+                var caminho = File.ReadLines(arquivo).FirstOrDefault()?.Trim().Trim('"');
+                if (string.IsNullOrEmpty(caminho)) return null;
+                if (File.Exists(caminho)) return caminho;
+                Console.WriteLine($"[Browser] navegador.txt aponta pra um arquivo que não existe: {caminho}");
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Browser] Falha ao ler navegador.txt: {ex.Message}");
+            }
+            return null;
         }
 
         // Procura o executável de duas formas:

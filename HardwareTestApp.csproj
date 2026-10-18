@@ -24,6 +24,14 @@
 		<None Remove="FormSplash.csold" />
 	</ItemGroup>
 
+	<!-- WinPE não tem o icu.dll (System32) que o .NET 5+ usa pra idioma/datas/números:
+	     sem isso o agente fecha na hora com "Could not load ICU data. UErrorCode: 2".
+	     UseNls faz o .NET usar a API NLS do próprio Windows (existe no WinPE), mantendo
+	     a formatação pt-BR igual no Windows normal. -->
+	<ItemGroup>
+		<RuntimeHostConfigurationOption Include="System.Globalization.UseNls" Value="true" />
+	</ItemGroup>
+
 	<!-- Instaladores redistribuíveis embutidos (ex: PawnIO_setup.exe) — copiados pra
 	     junto do .exe publicado, de onde PawnIoBootstrap.cs sabe procurá-los. Se a pasta
 	     estiver vazia (só o README.txt), isso não copia nada além dele — sem erro. -->

@@ -72,6 +72,8 @@ namespace HardwareTestApp
 
         // Discos
         public List<string> HddInfo { get; private set; } = new List<string>();
+        // Modelo + serial de cada disco (ver StorageInfo.Detalhados)
+        public List<string> DiscosDetalhados { get; private set; } = new List<string>();
         public List<String> HddSizes;
         // Vídeo e LCD
         public List<Gpu> Gpus { get; private set; } = new List<Gpu>();
@@ -90,28 +92,28 @@ namespace HardwareTestApp
         {
             var stopwatch = Stopwatch.StartNew();
 
-     
-                // Agrupando consultas para mais eficiência
-                GetComputerSystemInfo();
-                GetBiosInfo();
-                GetOperatingSystemInfo();
-                GetWindowsFeatureVersion();
-                //GetProcessorInfo();
-                GetGpuInfo();
-              //  GetMemoryInfo();
-                GetDiskInfo();
-                // GetBatteryInfo();
-                IsWindowsActivated = IsWindowsActivatedNEW();
-                // GetWindowsActivationInfo();
-            
+            // Cada etapa isolada: no WinPE (ou num PC sem algum driver) uma leitura
+            // pode falhar — antes isso cancelava o Load inteiro e o /api/pc-info
+            // ficava sem processador, memória, disco, sistema... por causa de um item só.
+            Executar(nameof(GetComputerSystemInfo), GetComputerSystemInfo);
+            Executar(nameof(GetBiosInfo), GetBiosInfo);
+            Executar(nameof(GetOperatingSystemInfo), GetOperatingSystemInfo);
+            Executar(nameof(GetWindowsFeatureVersion), GetWindowsFeatureVersion);
+            Executar(nameof(GetGpuInfo), GetGpuInfo);
+            Executar(nameof(GetDiskInfo), GetDiskInfo);
+            Executar("IsWindowsActivated", () => IsWindowsActivated = IsWindowsActivatedNEW());
 
             // Funções que dependem de dados já coletados
-            BuildLcdString();
-           
-           
+            Executar(nameof(BuildLcdString), BuildLcdString);
 
             stopwatch.Stop();
             Console.WriteLine($"Tempo total para carregar informações: {stopwatch.ElapsedMilliseconds} ms");
+        }
+
+        private static void Executar(string etapa, Action acao)
+        {
+            try { acao(); }
+            catch (Exception ex) { Console.WriteLine($"[PC-Info] Falha em {etapa}: {ex.Message}"); }
         }
 
         #region Métodos de Coleta de Dados
@@ -321,6 +323,9 @@ namespace HardwareTestApp
                         {
                             // Se existe, APENAS SOMA a capacidade ao item existente
                             memoriaAgrupada[serialNumber].CapacityBytes += capacity;
+                            // Vários bancos com o mesmo serial (geralmente "00000000")
+                            // = chips soldados na placa: marca como on board pro relatório
+                            memoriaAgrupada[serialNumber].IsOnBoard = "Sim";
                             serial = serialNumber.ToString();
                             //MessageBox.Show("Serial Repetido: "+serial);
                         }
@@ -369,6 +374,7 @@ namespace HardwareTestApp
                 // A formatação do total continua a mesma
                 MemoryTotal = $"{Math.Round(totalMemoryBytes / 1073741824.0, 2)}GB";
                 String MemoryOnBoard = $"{Math.Round(onBoard / 1073741824.0, 2)}GB";
+                if (Memorias.Count == 0) return MemoryTotal; // WMI não listou nenhum pente
                 if (onBoard != 0) {
                     return (MemoryTotal + " " + Memorias[0].MemoryType + " " + Memorias[0].ConfiguredClockSpeed + "Mhz com "+ MemoryOnBoard+" OnBoard");
                 }
@@ -406,16 +412,19 @@ namespace HardwareTestApp
             HddInfo = new List<String>();
             StorageInfo storageInfo = new StorageInfo();
             HddInfo = storageInfo.Verifica();
+            DiscosDetalhados = storageInfo.Detalhados;
 
             HddSizes = new List<String>();
             double convert = 0;
+            try
+            {
             ManagementClass mc = new ManagementClass("Win32_DiskDrive");
             ManagementObjectCollection moc = mc.GetInstances();
             if (moc.Count != 0)
             {
                 foreach (ManagementObject mo in mc.GetInstances())
                 {
-                    if (!mo["InterfaceType"].ToString().Contains("USB"))
+                    if (!(mo["InterfaceType"]?.ToString() ?? "").Contains("USB"))
                     {
 
                         convert = Convert.ToDouble(mo["Size"]) / 1073741824;
@@ -426,8 +435,11 @@ namespace HardwareTestApp
 
                 }
             }
-
-
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"[Disco] Falha ao ler tamanhos (Win32_DiskDrive): {ex.Message}");
+            }
         }
 
 
@@ -512,39 +524,32 @@ namespace HardwareTestApp
 
     private void BuildLcdString()
         {
-            var primaryGpu = Gpus[0];
-            if (Gpus.Count == 1)
+            // Usa a GPU com a maior resolução ativa. Antes isso pegava Gpus[0] sem
+            // conferir se a lista tinha algo e usava .Value em resolução nula — no
+            // WinPE (sem driver de vídeo) quebrava com "Index was out of range".
+            var primaryGpu = Gpus
+                .Where(g => g.HorizontalResolution.HasValue && g.VerticalResolution.HasValue)
+                .OrderByDescending(g => g.HorizontalResolution)
+                .FirstOrDefault();
+
+            uint hRes, vRes;
+            if (primaryGpu != null)
             {
-                
-                goto geraString;
+                hRes = primaryGpu.HorizontalResolution!.Value;
+                vRes = primaryGpu.VerticalResolution!.Value;
             }
-
-
-            if (Gpus.Count > 1)
-            {
-
-                if (Gpus[0].HorizontalResolution == null) { primaryGpu = Gpus[1]; }
-                if (Gpus[1].HorizontalResolution == null) { primaryGpu = Gpus[0]; }
-                if (Gpus[1].HorizontalResolution > Gpus[0].HorizontalResolution)
-                {
-                    primaryGpu = Gpus[1];
-
-
-                }
-
-                goto geraString;
-            }
-
             else
             {
-                LcdDetalhado = "Resolução não disponível" + Gpus.Count;
-                return;
+                // Sem resolução pelo WMI (adaptador básico do WinPE): lê do monitor
+                var tela = System.Windows.Forms.Screen.PrimaryScreen?.Bounds;
+                if (tela == null || tela.Value.Width <= 0)
+                {
+                    LcdDetalhado = "Resolução não disponível";
+                    return;
+                }
+                hRes = (uint)tela.Value.Width;
+                vRes = (uint)tela.Value.Height;
             }
-
-        geraString:
-
-            var hRes = primaryGpu.HorizontalResolution.Value;
-            var vRes = primaryGpu.VerticalResolution.Value;
             string resType = " ";
 
             if (hRes >= 5120) resType = "5K";
@@ -559,7 +564,7 @@ namespace HardwareTestApp
 
 
             string refresh = "";
-            if (primaryGpu.RefreshRate > 60)
+            if (primaryGpu?.RefreshRate > 60)
             {
                 refresh = primaryGpu.RefreshRate + " Hz";
             }

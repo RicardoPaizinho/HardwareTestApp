@@ -7,6 +7,9 @@ namespace HardwareTestApp
     internal class StorageInfo
     {
         public List<String> HddName;
+        // Modelo + serial de cada disco (ex: "NETNV256ME4 (SN: 0123...) - 256 GB SSD NVMe"),
+        // salvo no campo discosDetalhado do relatório. Preenchido junto com HddName.
+        public List<string> Detalhados = new List<string>();
         string diskName;
         string diskType;
         string diskSizeGB;
@@ -34,9 +37,10 @@ namespace HardwareTestApp
         private List<string> VerificaDiskDrive()
         {
             HddName = new List<String>();
+            Detalhados = new List<string>();
             try
             {
-                using var searcher = new ManagementObjectSearcher("SELECT Model, Size, InterfaceType FROM Win32_DiskDrive");
+                using var searcher = new ManagementObjectSearcher("SELECT Model, Size, InterfaceType, SerialNumber FROM Win32_DiskDrive");
                 foreach (ManagementObject disk in searcher.Get())
                 {
                     string interfaceType = disk["InterfaceType"]?.ToString() ?? "";
@@ -47,6 +51,7 @@ namespace HardwareTestApp
                     Console.WriteLine($"Tamanho: {sizeGB} GB");
                     Console.WriteLine();
                     HddName.Add($"{sizeGB} GB {interfaceType}".Trim());
+                    Detalhados.Add(FormatarDetalhe(disk["Model"]?.ToString(), disk["SerialNumber"]?.ToString(), $"{sizeGB} GB {interfaceType}"));
                 }
             }
             catch (Exception ex)
@@ -59,6 +64,7 @@ namespace HardwareTestApp
         private List<string> VerificaStorage()
         {
             HddName = new List<String>();
+            Detalhados = new List<string>();
             var scope = new ManagementScope(@"\\.\ROOT\Microsoft\Windows\Storage");
             var query = new ObjectQuery("SELECT * FROM MSFT_PhysicalDisk");
             var searcher = new ManagementObjectSearcher(scope, query);
@@ -80,8 +86,16 @@ namespace HardwareTestApp
                 Console.WriteLine($"Tipo de barramento: {ObterTipoBarramento(busType)}");
                 Console.WriteLine();
                 HddName.Add(sizeGB + " GB " + tipoMidia + " " + $"{ObterTipoBarramento(busType)}");
+                Detalhados.Add(FormatarDetalhe(name, disk["SerialNumber"]?.ToString(), $"{sizeGB} GB{tipoMidia} {ObterTipoBarramento(busType)}"));
             }
             return HddName;
+        }
+
+        private static string FormatarDetalhe(string? modelo, string? serial, string resumo)
+        {
+            var sn = (serial ?? "").Trim().TrimEnd('.');
+            var partes = (modelo ?? "Disco").Trim() + (sn.Length > 0 ? $" (SN: {sn})" : "");
+            return $"{partes} - {resumo.Trim()}";
         }
 
         static string ObterTipoBarramento(ushort busType)
