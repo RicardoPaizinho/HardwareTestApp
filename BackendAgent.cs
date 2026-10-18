@@ -307,6 +307,53 @@ namespace HardwareTestApp
                 app.MapGet("/api/report-details", () => Results.Json(LerDetalhesRelatorio()));
 
                 // ==========================================
+                //     ERROS DE HARDWARE WHEA (EventLogAnalyzer / CpuStress)
+                // ==========================================
+                app.MapGet("/api/whea", (int? dias) =>
+                    Results.Json(WheaService.LerEventos(NormalizarDiasEventLog(dias))));
+
+                // Grava o arquivo de provas em Redist\logs\<Modelo>_<Serial>.txt
+                // (substitui o script Capturar-Crash.ps1)
+                app.MapPost("/api/whea/salvar", () =>
+                {
+                    try
+                    {
+                        dynamic? pc = ObterPcInfo();
+                        string modelo = pc?.model ?? SystemInfo.GetComputerModel();
+                        string serial = pc?.serialNumber ?? SystemInfo.GetSerialNumber();
+                        var arquivo = WheaService.SalvarProvas(modelo, serial, _eventLogsCached);
+                        return Results.Json(new { success = true, arquivo });
+                    }
+                    catch (Exception ex)
+                    {
+                        return Results.Json(new { success = false, message = ex.Message }, statusCode: 500);
+                    }
+                });
+
+                // ==========================================
+                //     CPU STRESS (CpuStress.vue)
+                // ==========================================
+                app.MapGet("/api/cpu/topologia", () =>
+                {
+                    var nome = CpuStressService.NomeProcessador();
+                    return Results.Json(new
+                    {
+                        nome,
+                        microcode = CpuStressService.RevisaoMicrocode(),
+                        intelRaptorLake = CpuStressService.IntelRaptorLake(nome),
+                        processadores = CpuStressService.Topologia()
+                    });
+                });
+                app.MapPost("/api/stress/start", (StressPedido pedido) =>
+                    Results.Json(CpuStressService.Iniciar(pedido.DuracaoSeg, pedido.ApicIds)));
+                app.MapGet("/api/stress/status", () => Results.Json(CpuStressService.Status()));
+                app.MapPost("/api/stress/stop", () =>
+                {
+                    CpuStressService.Parar();
+                    return Results.Json(new { success = true });
+                });
+
+                // ==========================================
                 //     HISTÓRICO DE FALHAS (EventLogAnalyzer.vue)
                 // ==========================================
                 // Serve o cache computado no startup (UpdateLogsCache, chamado
@@ -921,6 +968,9 @@ namespace HardwareTestApp
                 {
                     var corte = DateTime.Now.AddDays(-dias);
                     var resultado = new List<object>();
+                    // Minidumps analisados uma vez por atualização (ver MinidumpService):
+                    // é deles que sai o driver que causou cada tela azul
+                    var minidumps = MinidumpService.AnalisarPastaPadrao();
 
                     using var systemLog = new EventLog("System");
                     var entries = systemLog.Entries;
@@ -950,7 +1000,10 @@ namespace HardwareTestApp
                             // Parâmetros crus do evento (ex: Kernel-Power 41 traz o BugcheckCode
                             // em decimal na posição 0 quando o desligamento foi uma tela azul)
                             dados,
-                            driver
+                            driver,
+                            // Tela azul com minidump correspondente (mesmo código e parâmetros)
+                            minidump = MinidumpService.AcharParaEvento(
+                                string.Join(" ", dados) + " " + e.Message, minidumps)
                         });
                     }
 
